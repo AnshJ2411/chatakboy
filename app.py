@@ -21,7 +21,7 @@ from collections import defaultdict
 from typing import Any
 
 import requests
-from flask import Flask, Response, jsonify, request
+from flask import Flask, jsonify, request
 from google import genai
 from google.genai import types
 
@@ -36,7 +36,7 @@ app = Flask(__name__)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "").strip()
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
 IG_ACCESS_TOKEN = os.getenv("IG_ACCESS_TOKEN", "")
 IG_ACCOUNT_ID = os.getenv("IG_ACCOUNT_ID", "")
 META_APP_SECRET = os.getenv("META_APP_SECRET", "")  # recommended, optional for first test
@@ -321,32 +321,19 @@ def health() -> tuple[Any, int]:
     )
 
 
-@app.get("/webhook", strict_slashes=False)
-def verify_webhook() -> Response:
+@app.get("/webhook")
+def verify_webhook() -> tuple[str, int]:
     """Meta calls this once to verify the callback URL."""
-    mode = request.args.get("hub.mode", "")
-    supplied_token = request.args.get("hub.verify_token", "")
-    challenge = request.args.get("hub.challenge", "")
-    token_matches = bool(VERIFY_TOKEN) and hmac.compare_digest(
-        supplied_token, VERIFY_TOKEN
-    )
-
-    # Never log the token itself. These fields are enough to diagnose a 403,
-    # wrong path, missing query parameters, or an old Render deployment.
-    log.info(
-        "Webhook verification request: mode=%r token_matches=%s challenge_present=%s",
-        mode,
-        token_matches,
-        bool(challenge),
-    )
-
-    if mode == "subscribe" and token_matches and challenge:
-        return Response(challenge, status=200, mimetype="text/plain")
-
-    return Response("verification failed", status=403, mimetype="text/plain")
+    if (
+        request.args.get("hub.mode") == "subscribe"
+        and request.args.get("hub.verify_token") == VERIFY_TOKEN
+        and VERIFY_TOKEN
+    ):
+        return request.args.get("hub.challenge", ""), 200
+    return "verification failed", 403
 
 
-@app.post("/webhook", strict_slashes=False)
+@app.post("/webhook")
 def handle_webhook() -> tuple[Any, int]:
     """Validate, deduplicate and queue events, then acknowledge Meta immediately."""
     raw_body = request.get_data(cache=True)
