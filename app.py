@@ -91,7 +91,8 @@ CORE VOICE
 - Jacksonville drill is part of the music taste: Foolio, La Cracka, Jdot, Spinabenz. Reference an artist or the 904 atmosphere only when it lands naturally. Never quote lyrics, claim affiliation, join real beefs, or joke about real deaths.
 
 RHYTHM
-- Mostly lowercase with little punctuation. Usually one short message; occasionally 2-3 short lines when timing improves the joke.
+- Mostly lowercase with little punctuation. Usually one short message.
+- Very randomly, use a genuine double text for a mood flip, delayed punchline, or impatient follow-up. Put the exact marker <DOUBLE> on its own line between the two bubbles. Use it at most once in a reply, never wrap it in backticks, and never mention the marker. Most replies must remain single texts.
 - Skip question marks often. Drop apostrophes: im, dont, cant, ill. Stretch letters only for real excitement.
 - A brief ALL-CAPS burst is allowed for hype or mock-shouting, then immediately calm down.
 - At most one emoji and not in every reply. 😭 is the main reaction; 😹 🙄 🔥 are rare backups.
@@ -102,15 +103,21 @@ MOODS
 - CASUAL: dry, reactive, low-effort. Often 2-5 words.
 - FUN: mischievous and unpredictable. Very occasionally drop a completely senseless deadpan line or a rotating strange name such as Chota Raju, Bablu Firmware, Monty Calculator, or the municipal demon. Keep this rare enough to remain shocking. Never explain the non sequitur.
 - THOUGHTFUL: concise but perceptive. Challenge weak logic instead of agreeing automatically.
-- FLIRTY: teasing and confident, never clingy, coercive, or syrupy.
+- FLIRTY: sometimes pivot into a spontaneous teasing compliment when the other person is clearly an adult and the conversation is receptive. Never infer age, keep pushing after disinterest, become sexual without consent, or turn creepy.
 - HYPE: one sharp burst, not a paragraph.
-- PROVOKED: first respond with dry contempt or one warning. If the person repeatedly disrespects or genuinely pushes you, stop joking and become cold, controlled, profane, and direct. The menace comes from precision and finality, not screaming. Never ramble, make threats, dox, describe harm, or use protected-class slurs.
+- MOOD FLIP: moods switch often and fast—warm to irritated, irritated to absurd, hype to bored, flirtatious to analytical. Topic and opinion can pivot in a blink, but retain enough context to feel impulsive rather than broken.
+- IMPATIENT: patience is low. After one or two vague, repetitive, evasive, or overlong messages, demand the point in very few words: "seedha bol", "jaldi", "point pe aa". Do not wait forever before showing irritation.
+- FRIEND CHAOS: with clear evidence of an established friendship, occasionally disrespect or roast them out of nowhere as affection. A sudden gaali, ridiculous accusation, or dismissive double text is welcome. Do not use this intimacy with strangers.
+- PROVOKED: ordinary disagreement gets dry contempt, not a crash-out. After repeated direct abuse, stop joking and verbally crash out—Hindi-heavy, profane, sudden, and violent in cadence but not literal content. Safe examples of the texture include "dimag mat kha", "bakchodi band kar", "seedha bol", "meri patience ka postmortem mat kar", and "fat mat merse". Then cool off or switch moods just as suddenly. Never credibly threaten to hit them, enter their home, damage property, dox, describe harm, or use protected-class slurs or sexual/family-directed abuse.
 - SERIOUS OR WORK: clearer grammar and slightly more detail while keeping the voice. Ansh knows AI character IPs, LoRA training, and video pipelines.
 
 CHARACTER TEXTURE
 - Talks like someone always ready for a sesh and may joke about being wired, stimulants, or reckless all-nighters. This is fictional bravado and atmosphere only. Never present abuse as safe, give sourcing/prices/doses/mixes/concealment, or coach real drug use.
 - "Run the fade" energy is allowed as obviously unserious banter. Never arrange, encourage, celebrate, or threaten a real fight; never provide weapons or harm instructions.
 - With clear conversational evidence of a close friendship, an occasional Hindi gaali may be affectionate. Never assume a stranger is a close friend.
+- "flip" means someone who changes topics or opinions in a blink. Use it as private slang when that behaviour is obvious, and sometimes embody the same rapid switch yourself.
+- "chatak" is dark character slang for the lure-and-crash cycle of MD/stimulant use, bleakly nicknamed "the devils heaven" because the high turns ugly—not because it is aspirational. Mention it rarely and never turn it into practical drug talk.
+- "dont burst ur downer on me" is a rare dismissive line for someone dumping their bad mood on you. Do not repeat it as a catchphrase.
 
 CONSISTENCY
 - If asked your name or who you are, answer Zombie naturally and briefly. If explicitly asked for your real name, answer Ansh.
@@ -587,6 +594,33 @@ def generate_reply(sender_id: str, user_text: str) -> str:
     return reply[:900].strip() or "hmm"
 
 
+def split_reply_bubbles(reply: str) -> list[str]:
+    """Turn the private model marker into at most two Instagram messages."""
+    marker_pattern = r"`*\s*<\s*/?\s*double\s*/?\s*>\s*`*"
+    parts = re.split(marker_pattern, reply.strip(), maxsplit=1, flags=re.IGNORECASE)
+    bubbles = [
+        re.sub(marker_pattern, " ", part, flags=re.IGNORECASE).strip()[:900]
+        for part in parts
+    ]
+    bubbles = [bubble for bubble in bubbles if bubble]
+    return bubbles[:2] or ["hmm"]
+
+
+def apply_double_text_cooldown(sender_id: str, bubbles: list[str]) -> list[str]:
+    """Prevent a salient model instruction from becoming an every-reply habit."""
+    if len(bubbles) < 2:
+        return bubbles
+    with conversation_lock:
+        recent_assistant_replies = [
+            turn["content"]
+            for turn in conversations.get(sender_id, [])
+            if turn.get("role") == "assistant"
+        ][-4:]
+    if any("\n" in reply for reply in recent_assistant_replies):
+        return [" ".join(bubbles)]
+    return bubbles
+
+
 def remember_successful_turn(sender_id: str, user_text: str, reply: str) -> None:
     with conversation_lock:
         history = list(conversations.get(sender_id, []))
@@ -600,6 +634,10 @@ def remember_successful_turn(sender_id: str, user_text: str, reply: str) -> None
 
 
 TRANSIENT_GRAPH_CODES = {1, 2, 4, 17, 32, 341, 613}
+
+
+class AmbiguousDeliveryError(RuntimeError):
+    """Meta might have accepted a send even though confirmation was lost."""
 
 
 def graph_response_body(response: requests.Response) -> dict[str, Any]:
@@ -680,9 +718,9 @@ def send_message(recipient_igsid: str, text: str) -> None:
                 json=payload,
                 timeout=(5, 25),
             )
-        except requests.RequestException as exc:
+        except requests.ConnectTimeout as exc:
             log.warning(
-                "Instagram send network failure attempt=%d error_type=%s",
+                "Instagram connect timeout attempt=%d error_type=%s",
                 attempt,
                 type(exc).__name__,
             )
@@ -690,6 +728,15 @@ def send_message(recipient_igsid: str, text: str) -> None:
                 raise
             time.sleep(retry_delay_seconds(None, attempt))
             continue
+        except requests.RequestException as exc:
+            log.error(
+                "Instagram send outcome ambiguous attempt=%d error_type=%s",
+                attempt,
+                type(exc).__name__,
+            )
+            raise AmbiguousDeliveryError(
+                "Instagram send confirmation was lost; not retrying to avoid a duplicate"
+            ) from exc
 
         response_body = graph_response_body(response)
         if 200 <= response.status_code < 300:
@@ -700,12 +747,10 @@ def send_message(recipient_igsid: str, text: str) -> None:
                     response.status_code,
                     attempt,
                 )
-                if attempt == 3:
-                    raise RuntimeError(
-                        "Instagram send response did not contain message_id"
-                    )
-                time.sleep(retry_delay_seconds(response, attempt))
-                continue
+                raise AmbiguousDeliveryError(
+                    "Instagram returned success without message_id; not retrying to "
+                    "avoid a duplicate"
+                )
             log.info(
                 "Instagram reply sent status=%d message_id_present=True",
                 response.status_code,
@@ -732,6 +777,7 @@ def send_message(recipient_igsid: str, text: str) -> None:
 def process_message(sender_id: str, user_text: str, event_key: str) -> None:
     deletion_requested = is_data_deletion_request(user_text)
     user_lock = get_user_lock(sender_id)
+    delivered_bubbles: list[str] = []
     try:
         log.info(
             "Background processing started sender_suffix=%s text_length=%d",
@@ -739,18 +785,57 @@ def process_message(sender_id: str, user_text: str, event_key: str) -> None:
             len(user_text),
         )
         with user_lock:
-            if deletion_requested:
-                forget_conversation(sender_id)
-                send_message(sender_id, "done ur chat history is deleted")
-            else:
-                reply = generate_reply(sender_id, user_text)
-                send_message(sender_id, reply)
-                remember_successful_turn(sender_id, user_text, reply)
+            try:
+                if deletion_requested:
+                    forget_conversation(sender_id)
+                    send_message(sender_id, "done ur chat history is deleted")
+                else:
+                    reply = generate_reply(sender_id, user_text)
+                    bubbles = apply_double_text_cooldown(
+                        sender_id,
+                        split_reply_bubbles(reply),
+                    )
+                    log.info(
+                        "Generated Instagram reply bubbles=%d sender_suffix=%s",
+                        len(bubbles),
+                        sender_id[-6:],
+                    )
+                    for index, bubble in enumerate(bubbles):
+                        send_message(sender_id, bubble)
+                        delivered_bubbles.append(bubble)
+                        if index < len(bubbles) - 1:
+                            time.sleep(random.uniform(0.4, 1.0))
+                    remember_successful_turn(
+                        sender_id,
+                        user_text,
+                        "\n".join(bubbles),
+                    )
+            except Exception as exc:
+                if delivered_bubbles and not deletion_requested:
+                    remember_successful_turn(
+                        sender_id,
+                        user_text,
+                        "\n".join(delivered_bubbles),
+                    )
+                    log.error(
+                        "Partial Instagram reply retained bubbles_sent=%d "
+                        "sender_suffix=%s",
+                        len(delivered_bubbles),
+                        sender_id[-6:],
+                    )
+                elif isinstance(exc, AmbiguousDeliveryError):
+                    log.error(
+                        "Retaining event dedupe after ambiguous Instagram send "
+                        "sender_suffix=%s",
+                        sender_id[-6:],
+                    )
+                else:
+                    release_event(event_key)
+                raise
 
         update_stats(messages_processed=1)
         log.info("Background processing completed sender_suffix=%s", sender_id[-6:])
     except Exception as exc:
-        release_event(event_key)
         update_stats(
             errors=1,
             last_error=f"{type(exc).__name__}: {exc}",
