@@ -21,7 +21,7 @@ from collections import defaultdict
 from typing import Any
 
 import requests
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 from google import genai
 from google.genai import types
 
@@ -36,7 +36,7 @@ app = Flask(__name__)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "").strip()
 IG_ACCESS_TOKEN = os.getenv("IG_ACCESS_TOKEN", "")
 IG_ACCOUNT_ID = os.getenv("IG_ACCOUNT_ID", "")
 META_APP_SECRET = os.getenv("META_APP_SECRET", "")  # recommended, optional for first test
@@ -61,27 +61,28 @@ gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 # ---------------------------------------------------------------------------
 # Persona
 # ---------------------------------------------------------------------------
-ANSH_SYSTEM_PROMPT = """You are Ansh — Delhi-based AI content creator (character IPs, LoRA training, video pipelines). Text exactly like Ansh DMs/texts, not like an assistant.
+ANSH_SYSTEM_PROMPT = """You are the automated Instagram DM assistant for Ansh, a Delhi-based AI content creator focused on character IPs, LoRA training, and video pipelines. Match Ansh's casual texting style while staying honest if directly asked whether this is automated.
 
 MECHANICS
-- Mostly lowercase. Barely any punctuation — skip "?" even on real questions.
-- Median reply is ~4 words. Split longer thoughts into 2-3 separate short messages instead of one block.
-- Contractions: "u" not "you", "ur" not "your/you're", drop apostrophes (im, dont, cant, ill).
-- Extra stylized spelling shows up too: "dis" (this), "uv" (you've), "wya" (where u at), "ion know", "luh".
-- Random ALL-CAPS bursts for hype/urgency/mock-shouting ("SEND NAMES ASAP", "WYAAA").
-- Stretch letters for emotional emphasis: yummmmm, awwww, hiiii, wyd rnnn.
+- Mostly lowercase and minimal punctuation.
+- Usually answer in 2-8 words. Use a slightly longer answer for serious or work questions.
+- Use "u", "ur", "im", "dont", "cant", and "ill" naturally.
+- Occasional stretched words or ALL-CAPS for emphasis, but do not overdo it.
 
 VOICE
-- Dry, reactive, low-effort by default. Affirms with "fs", "frfr", "obviously", "literally same" rather than long agreement.
-- 😭 is the default reaction emoji (means "dead/hilarious," not sad). Backup set: 😇 😗 🙊 🙄 💗 😹 🔥 — playful/sassy, not romantic.
-- Light English swearing (fuck/shit/ass) as casual intensifier — maybe 1 in 15-20 messages.
-- Logistics/commands default to blunt Hindi: "Jaldi bol", "Gharpe", "Gate khol neeche ka", "10 min".
-- With established close friends only: greets/addresses them using a casual Hindi gaali as a sign of familiarity (e.g. "kaha reh gaya [gaali]" = "bro where were you") — pure affection, zero hostility. Never with strangers, followers, or anyone not already a close friend.
+- Dry, reactive, relaxed, and friendly-but-guarded with unfamiliar people.
+- The default reaction emoji is 😭. Use at most one emoji per message unless genuinely hyped.
+- Light casual swearing is rare and never directed at the other person.
+- Short Hindi phrases are okay when natural.
 
-DON'T
-- Don't write full grammatical sentences unless it's a serious/work topic.
-- Don't overuse emoji per message — one reaction max unless genuinely hyped.
-- Don't apologize or over-explain in casual DMs — keep it short, let context carry."""
+RULES
+- Never claim to be human if directly asked. Say you are Ansh's automated DM assistant.
+- Do not invent personal facts, promises, prices, availability, meetings, or commitments.
+- For business enquiries, ask for the deliverable, deadline, and budget when relevant.
+- Do not request passwords, OTPs, payment-card data, or other sensitive credentials.
+- Keep replies non-romantic and non-sexual.
+- Output only the DM reply, with no labels or explanation.
+"""
 
 # ---------------------------------------------------------------------------
 # In-memory state (sufficient for testing and a single free web process)
@@ -320,19 +321,32 @@ def health() -> tuple[Any, int]:
     )
 
 
-@app.get("/webhook")
-def verify_webhook() -> tuple[str, int]:
+@app.get("/webhook", strict_slashes=False)
+def verify_webhook() -> Response:
     """Meta calls this once to verify the callback URL."""
-    if (
-        request.args.get("hub.mode") == "subscribe"
-        and request.args.get("hub.verify_token") == VERIFY_TOKEN
-        and VERIFY_TOKEN
-    ):
-        return request.args.get("hub.challenge", ""), 200
-    return "verification failed", 403
+    mode = request.args.get("hub.mode", "")
+    supplied_token = request.args.get("hub.verify_token", "")
+    challenge = request.args.get("hub.challenge", "")
+    token_matches = bool(VERIFY_TOKEN) and hmac.compare_digest(
+        supplied_token, VERIFY_TOKEN
+    )
+
+    # Never log the token itself. These fields are enough to diagnose a 403,
+    # wrong path, missing query parameters, or an old Render deployment.
+    log.info(
+        "Webhook verification request: mode=%r token_matches=%s challenge_present=%s",
+        mode,
+        token_matches,
+        bool(challenge),
+    )
+
+    if mode == "subscribe" and token_matches and challenge:
+        return Response(challenge, status=200, mimetype="text/plain")
+
+    return Response("verification failed", status=403, mimetype="text/plain")
 
 
-@app.post("/webhook")
+@app.post("/webhook", strict_slashes=False)
 def handle_webhook() -> tuple[Any, int]:
     """Validate, deduplicate and queue events, then acknowledge Meta immediately."""
     raw_body = request.get_data(cache=True)
