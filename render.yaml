@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: ansh-instagram-dm-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: GRAPH_API_VERSION
+        value: v25.0
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
+      - key: WORKER_COUNT
+        value: "2"
+      - key: MAX_TURNS
+        value: "12"
+      - key: VERIFY_TOKEN
+        sync: false
+      - key: IG_ACCESS_TOKEN
+        sync: false
+      - key: IG_ACCOUNT_ID
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
