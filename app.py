@@ -112,14 +112,27 @@ def missing_required_config() -> list[str]:
 
 def validate_signature(raw_body: bytes, supplied_signature: str | None) -> bool:
     """Validate Meta's X-Hub-Signature-256 when META_APP_SECRET is configured."""
+    # 🔴 TEMP DEBUG LOGS 🔴
+    log.info("=== SIGNATURE VALIDATION DEBUG ===")
+    log.info("META_APP_SECRET configured?: %s (length: %d)", bool(META_APP_SECRET), len(META_APP_SECRET.strip()))
+    log.info("Header X-Hub-Signature-256: %s", supplied_signature)
+    
     if not META_APP_SECRET:
+        log.info("META_APP_SECRET is not set; skipping validation.")
         return True
+
     if not supplied_signature or not supplied_signature.startswith("sha256="):
+        log.warning("Missing or malformed X-Hub-Signature-256 header.")
         return False
 
     expected = "sha256=" + hmac.new(
-        META_APP_SECRET.encode("utf-8"), raw_body, hashlib.sha256
+        META_APP_SECRET.strip().encode("utf-8"), raw_body, hashlib.sha256
     ).hexdigest()
+
+    log.info("Calculated Signature:       %s", expected)
+    log.info("Matches?:                  %s", hmac.compare_digest(expected, supplied_signature))
+    log.info("==================================")
+
     return hmac.compare_digest(expected, supplied_signature)
 
 
