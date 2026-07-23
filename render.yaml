@@ -12,12 +12,38 @@ services:
         value: 3.12.8
       - key: GRAPH_API_VERSION
         value: v25.0
-      - key: GEMINI_MODEL
-        value: gemini-3.5-flash-lite
-      - key: WORKER_COUNT
-        value: "2"
+      - key: CLAUDE_MODEL
+        value: claude-haiku-4-5-20251001
+      - key: CLAUDE_MAX_TOKENS
+        value: "120"
       - key: MAX_TURNS
         value: "12"
+      - key: MAX_PENDING_MESSAGES
+        value: "50"
+      - key: MAX_USER_TEXT_CHARS
+        value: "1200"
+      - key: SPAM_BURST_WINDOW_SECONDS
+        value: "30"
+      - key: SPAM_BURST_MAX_MESSAGES
+        value: "5"
+      - key: SPAM_REPEAT_WINDOW_SECONDS
+        value: "600"
+      - key: SPAM_REPEAT_MAX_MESSAGES
+        value: "2"
+      - key: SPAM_COOLDOWN_SECONDS
+        value: "21600"
+      - key: SESSION_IDLE_SECONDS
+        value: "3600"
+      - key: SESSION_COOLDOWN_SECONDS
+        value: "21600"
+      - key: MAX_REPLIES_PER_SESSION
+        value: "20"
+      - key: MAX_REPLIES_PER_24H
+        value: "60"
+      - key: MAX_GLOBAL_CLAUDE_CALLS_PER_MINUTE
+        value: "20"
+      - key: MAX_GLOBAL_CLAUDE_CALLS_PER_24H
+        value: "300"
       - key: VERIFY_TOKEN
         sync: false
       - key: IG_ACCESS_TOKEN
@@ -26,5 +52,5 @@ services:
         sync: false
       - key: META_APP_SECRET
         sync: false
-      - key: GEMINI_API_KEY
+      - key: ANTHROPIC_API_KEY
         sync: false
