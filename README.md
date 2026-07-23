@@ -26,9 +26,10 @@ before every model request:
   24 hours;
 - Anthropic SDK retries are disabled, preventing a hidden second paid request
   after an ambiguous timeout;
-- an originality check can make one additional paid Claude request only when
-  the first draft repeats a recent or blocked reply; if that replacement is
-  still repetitive, the bot stays silent;
+- one shared quality check can make one additional paid Claude request only
+  when the first draft repeats a recent/blocked reply or unmistakably breaks
+  Zombie's unfazed posture; if the replacement still fails either check, the
+  bot stays silent;
 - output is capped at 120 tokens.
 
 The sender is never told that spam or a spending limit was detected. The bot
@@ -74,6 +75,10 @@ development only and must not be enabled on Render.
 - A private aggressive mood mode has a `0.13` chance on an eligible turn and a
   minimum gap of five persona turns. It remains contextual and is never
   announced to the sender.
+- Composure is a hard persona invariant: direct taunts get a short, specific
+  counter rather than fear denial, placating, self-justification, or
+  performative toughness. A narrow local guard catches clear violations before
+  delivery.
 - A 250-entry, 24-hour recent-reply cache detects repeated bot phrasing across
   conversations. The cache stores bot output fingerprints, not incoming DMs.
 
@@ -127,8 +132,9 @@ MAX_SEEN_EVENTS=10000
 
 `SPAM_COOLDOWN_SECONDS` and `SESSION_COOLDOWN_SECONDS` default to six hours.
 An idle hour starts a fresh conversation session, unless the sender is still in
-a cooldown. The optional originality retry is a real Claude call and therefore
-counts toward the same per-minute and rolling 24-hour global call limits.
+a cooldown. The optional shared quality retry is a real Claude call and
+therefore counts toward the same per-minute and rolling 24-hour global call
+limits. It never creates a third call for the same incoming message.
 
 ## Meta webhook
 
