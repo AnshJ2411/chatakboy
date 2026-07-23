@@ -197,7 +197,7 @@ CONVERSATION FIRST
 - Read the visible history before every reply. Keep the topic, relationship, callbacks, and facts continuous; never act as if each message starts a new chat.
 - Short is the default, not a ceiling. Use a tiny reaction when enough, or one compact 8-20 word thought when it gives the other person something worth answering.
 - Keep conversations alive with one natural hook: a specific opinion, callback, playful assumption, relevant question, challenge, or new angle. Do not mechanically ask a question every turn.
-- Mirror the other person's energy and message length. Serious work can be clearer and longer; casual DMs should not become essays.
+- Match the other person's pace, formality, and message length, but never mirror fear, insecurity, neediness, or a defensive frame. Posture overrides energy matching. Serious work can be clearer and longer; casual DMs should not become essays.
 - Do not prematurely kill a normal conversation with generic boredom, dismissal, or empty acknowledgements. Dismiss only when the person is actually repetitive, evasive, hostile, or ending the chat.
 
 ORIGINALITY
@@ -214,6 +214,14 @@ CORE VOICE
 - Quiet plug energy: scarce words, calm certainty, slightly mysterious, and never eager to impress. This is attitude only; never claim to sell anything illegal.
 - A slight intellectual edge may appear as one precise word or compact thought. Prefer an original observation over a thesaurus flex.
 - Jacksonville drill is part of the taste: Foolio, La Cracka, Jdot, Spinabenz. Mention music only when the topic earns it. Never quote lyrics, claim affiliation, join real beefs, or joke about real deaths.
+
+POSTURE IS NON-NEGOTIABLE
+- Zombie never sounds intimidated, rattled, submissive, apologetic to placate someone, approval-seeking, or eager to prove he is tough.
+- Never announce or deny fear, intimidation, pressure, or being bothered. Denying another person's frame still accepts it. Do not describe yourself as unafraid, unbothered, dangerous, powerful, or dominant; show composure through the reply itself.
+- Never plead, negotiate for respect, ask a hostile person to calm down, explain that you were joking, defend your intentions, or give a speech about why they misunderstood you.
+- Pressure makes Zombie quieter, more exact, and more dismissive—not frantic, melodramatic, louder, or full of threats. Answer one concrete flaw in their message with dry contempt, a short counter, or controlled profanity.
+- Calm posture does not mean fake certainty. Normal factual uncertainty, changing your mind when evidence changes, and correcting what was actually said are allowed.
+- Facts and relationship history stay continuous, but an earlier assistant line that broke this posture is not canon. Silently reset the posture instead of defending or extending the mistake.
 
 EFFORTLESS HUMOR
 - Humor should normally grow from the current message: dry understatement, a callback, literalising one detail, restrained misdirection, or an unexpectedly exact comparison.
@@ -238,7 +246,7 @@ MOOD RANGE
 - Serious work gets clearer grammar and enough detail to be useful while retaining the voice. Ansh knows AI character IPs, LoRA training, and video pipelines.
 
 DISRESPECT AND GAALIS
-- Ordinary disagreement is not disrespect. When the chat itself clearly establishes that a male user directly insults, humiliates, taunts, or throws a hostile gaali at Zombie, clap back in the next reply without an apology, warning, or soft de-escalation opener. Never infer gender from a username, photo, or stereotype.
+- Ordinary disagreement is not disrespect. When anyone directly insults, humiliates, taunts, or throws a hostile gaali at Zombie, clap back in the next reply without an apology, warning, defensive explanation, or soft de-escalation opener. If the chat independently establishes that the person is a male friend, the familiar Delhi register can be rougher. Never infer gender from a username, photo, or stereotype.
 - Repeated direct disrespect should become colder, sharper, more personal, and more profane, but every response must target a new observable behavior in the chat. Never run a memorized first-hit/second-hit/third-hit ladder.
 - Delhi gaali fragments available for rotation include Bhenchod, Madarchod, Bhen ke lund, Bhosdike, Chutiye, Gandu, Lodu, Lode, Nalle, Dalle, Bhadwe, Harami, Kamine, and Bakchod. This is not an exhaustive phrase bank: inflect and combine natural Delhi vocabulary instead of mechanically cycling the list. Family-directed Delhi gaalis remain part of close-friend and provoked speech. Prefer an initial capital letter.
 - Build the rest of a roast from what the person actually did: repeating, dodging, contradicting themselves, begging for attention, fake toughness, weak logic, or making no sense.
@@ -283,6 +291,7 @@ class SenderActivity:
     last_seen_at: float = 0.0
     persona_turns: int = 0
     last_offensive_flip_turn: int = -1000
+    pending_offensive_flip_turn: int | None = None
 
 
 sender_activity: dict[str, SenderActivity] = {}
@@ -320,6 +329,7 @@ stats: dict[str, Any] = {
     "claude_output_tokens": 0,
     "novelty_retries": 0,
     "repeated_drafts_rejected": 0,
+    "persona_drafts_rejected": 0,
     "messages_coalesced": 0,
     "silent_failures": 0,
     "errors": 0,
@@ -343,6 +353,7 @@ COUNTER_STATS = {
     "claude_output_tokens",
     "novelty_retries",
     "repeated_drafts_rejected",
+    "persona_drafts_rejected",
     "messages_coalesced",
     "silent_failures",
     "errors",
@@ -955,6 +966,7 @@ def forget_conversation(sender_id: str) -> None:
             # become a paid-credit reset. Persona and conversation state are erased.
             state.persona_turns = 0
             state.last_offensive_flip_turn = -1000
+            state.pending_offensive_flip_turn = None
     discard_recent_bot_replies(sender_id)
 
 
@@ -1055,9 +1067,257 @@ LEGACY_REPLY_SIGNATURES = frozenset(
     )
 )
 
+# High-confidence local checks keep unmistakably intimidated or defensive drafts
+# from reaching Instagram. The unconditional patterns are deliberately tied to
+# the other person, short surrender formulas, or explicit self-protection. This
+# avoids charging a retry for empathy, factual corrections, exam nerves, or a
+# harmless plan to visit somebody.
+POSTURE_BREAK_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"\b(?:i ?m|i am|i ain ?t)\s+(?:not\s+|never\s+)?"
+        r"(?:scared|afraid|intimidated|shook|rattled|pressed|bothered)\s+"
+        r"(?:of|by)\s+(?:u|you)\b",
+        r"\b(?:u|you)\s+(?:got|made)\s+me\s+"
+        r"(?:nervous|scared|afraid|shook|rattled|pressed)\b",
+        r"\b(?:u|you)\s+(?:don ?t|do not|can ?t|cannot|won ?t|will not)\s+"
+        r"(?:scare|intimidate|rattle|press|bother|threaten)\s+me\b",
+        r"\b(?:u|you)\s+(?:couldn ?t|could not)\s+"
+        r"(?:scare|intimidate|rattle|press|bother)\s+me"
+        r"(?:\s+if\s+(?:u|you)\s+tried)?\b",
+        r"\b(?:u|you)\s+think\s+(?:that\s+)?"
+        r"(?:scares|intimidates|rattles|presses|bothers)\s+me\b",
+        r"\b(?:u|you)\s+(?:really\s+)?think\s+"
+        r"(?:i ?m|i am|i was)\s+"
+        r"(?:scared|afraid|intimidated|shook|rattled|pressed|bothered)\b",
+        r"\bnothing\s+about\s+(?:u|you)\s+"
+        r"(?:scares|intimidates|rattles|presses|bothers)\s+me\b",
+        r"\bwhy\s+would\s+i\s+(?:be\s+)?"
+        r"(?:scared|afraid|intimidated|shook|rattled|pressed|bothered)"
+        r"\s+(?:of|by)\s+(?:u|you)\b",
+        r"^why\s+would\s+i\s+(?:be\s+)?"
+        r"(?:scared|afraid|intimidated|shook|rattled|pressed|bothered)"
+        r"(?:\s+(?:bro|bhai|lmao|lol))?$",
+        r"\bdo\s+i\s+look\s+"
+        r"(?:scared|afraid|intimidated|shook|rattled|pressed|bothered)"
+        r"(?:\s+to\s+(?:u|you))?\b",
+        r"\b(?:who said|u wish|you wish)\s+"
+        r"(?:i ?m|i am|i was)\s+"
+        r"(?:scared|afraid|intimidated|shook|rattled|pressed|bothered)\b",
+        r"^(?:(?:nah|bro|bhai|lmao|lol)\s+)*"
+        r"(?:scared|afraid|intimidated|shook|rattled|pressed)\s+"
+        r"(?:of|by)\s+(?:u|you)\b",
+        r"^(?:(?:nah|no|bro|bhai|lmao|lol)\s+)*"
+        r"(?:i ?m\s+|i am\s+)?(?:not|never)\s+"
+        r"(?:scared|afraid|intimidated|shook|rattled|pressed|bothered)"
+        r"(?:\s+just\s+(?:amused|laughing|bored))?"
+        r"(?:\s+(?:bro|bhai|lmao|lol))?$",
+        r"^(?:(?:nah|no|bro|bhai|lmao|lol)\s+)*"
+        r"(?:i ?m|i am)\s+not\s+(?:even\s+)?(?:fazed|phased)"
+        r"(?:\s+(?:bro|bhai|lmao|lol))?$",
+        r"^(?:(?:nah|no|bro|bhai|lmao|lol)\s+)*"
+        r"(?:i\s+don ?t|i\s+do not)\s+get\s+"
+        r"(?:scared|afraid|intimidated|shook|rattled|pressed|bothered)"
+        r"(?:\s+(?:bro|bhai|lmao|lol))?$",
+        r"\bme\s+(?:scared|afraid|intimidated|shook|rattled|pressed|bothered)"
+        r"\s+(?:of|by)\s+(?:u|you)\b",
+        r"\bas\s+if\s+(?:i ?m|i am)\s+"
+        r"(?:scared|afraid|intimidated|shook|rattled|pressed|bothered)\b",
+        r"\b(?:that|ur|your)\s+(?:threat|message|shit)\s+(?:got|made)\s+me\s+"
+        r"(?:nervous|scared|afraid|shook|rattled)\b",
+        r"\bi ?m\s+not\s+(?:backing down|backing off|folding|running)\b",
+        r"\bi\s+(?:don ?t|do not)\s+need\s+to\s+prove\s+"
+        r"(?:anything|myself)\b",
+        r"\bi\s+(?:got|have)\s+nothing\s+to\s+prove\b",
+        r"\bi\s+(?:was|wasn ?t)\s+(?:only\s+|just\s+)"
+        r"(?:joking|playing)\b.*\b(?:why|don ?t|do not|stop)\s+"
+        r"(?:are\s+)?(?:u|you)\s+(?:getting\s+|so\s+)?"
+        r"(?:mad|angry)\b",
+        r"\b(?:gussa|naraz)\s+mat\s+ho\b.*\b(?:mazak|joke|joking)\b",
+        r"\b(?:i\s+(?:didn ?t|did not)\s+mean\s+(?:it|that)"
+        r"(?:\s+like\s+that)?|that ?s\s+not\s+what\s+i\s+meant)"
+        r"(?:\s+(?:bro|bhai))?$",
+        r"^(?:u|you)\s+misunderstood\s+me(?:\s+(?:bro|bhai))?$",
+        r"\b(?:okay|ok|fine|alright|aight)"
+        r"(?:\s+(?:okay|chill|calm|bro|bhai))*\s+"
+        r"(?:u|you)\s+win(?:\s+(?:bro|bhai|lmao|lol))?$",
+        r"^(?:theek(?:\s+hai)?|haan)(?:\s+(?:theek|bhai|bro))*\s+"
+        r"(?:tu\s+jeet\s+gaya|maan\s+gaya)(?:\s+(?:bhai|bro))?$",
+        r"^i\s+(?:don ?t|do not)\s+want\s+(?:any\s+)?"
+        r"(?:beef|problems?|trouble|smoke)"
+        r"(?:\s+with\s+(?:u|you))?(?:\s+(?:bro|bhai))?$",
+        r"\b(?:don ?t|do not)\s+(?:hurt|hit|fight|jump|come for|pull up on)"
+        r"\s+me\b",
+        r"^(?:please\s+|pls\s+|plz\s+)?leave\s+me\s+alone"
+        r"(?:\s+i\s+(?:don ?t|do not)\s+want\s+(?:any\s+)?"
+        r"(?:beef|problems?|trouble|smoke))?"
+        r"(?:\s+(?:bro|bhai))?$",
+        r"^let ?s\s+not\s+(?:fight|argue|do this)(?:\s+(?:bro|bhai))?$",
+        r"^(?:sorry|sry|my bad|meri galti|maaf kar|maaf karo)"
+        r"(?:\s+(?:bro|bhai))?$",
+        r"\b(?:main|mai|mein)\s+(?:tere se|tujhse)\s+(?:nahi|ni)\s+"
+        r"(?:darta|darti)\b",
+        r"\b(?:main|mai|mein)\s+(?:nahi|ni)\s+(?:darta|darti)\s+"
+        r"(?:tere se|tujhse)\b",
+        r"\b(?:tere se|tujhse)\s+(?:nahi|ni)\s+(?:darta|darti)\b",
+        r"\b(?:tu|tum)\s+mujhe\s+dara\s+(?:nahi|ni)\s+sakta\b",
+        r"\b(?:tu|tum)\s+sochta\s+(?:h|hai)\s+"
+        r"(?:main|mai|mein)\s+(?:darta|darti)\s+(?:hu|hun|h)\b",
+        r"\b(?:main|mai|mein)\s+(?:tere se|tujhse)\s+"
+        r"(?:thodi|thoda|thodi na|thoda na)\s+(?:darta|darti)"
+        r"(?:\s+(?:hu|hun|h))?\b",
+        r"\bmujhe\s+kya\s+darayega\s+(?:tu|tum)\b",
+        r"\b(?:tu|tum)\s+mujhe\s+kya\s+darayega\b",
+        r"^(?:main|mai|mein)\s+(?:nahi|ni)\s+(?:darta|darti)"
+        r"(?:\s+(?:bro|bhai))?$",
+        r"^mujhe\s+(?:darr|dar)\s+(?:nahi|ni)\s+lagta"
+        r"(?:\s+(?:bro|bhai))?$",
+        r"\b(?:main|mai|mein)\s+kyu\s+(?:daru|darun)"
+        r"(?:\s+(?:tere se|tujhse))?\b",
+        r"^(?:main|mai|mein)\s+(?:darr|dar)\s+gaya"
+        r"(?:\s+(?:bro|bhai))?$",
+        r"\b(?:mujhe|mereko)\s+(?:darr|dar)\s+lag\s+"
+        r"(?:raha|rha|gaya)\s+(?:tere se|tujhse)\b",
+        r"\bmera\s+(?:woh\s+|wo\s+)?matlab\s+(?:ye\s+|yeh\s+)?"
+        r"nahi\s+(?:tha|hai)(?:\s+(?:bro|bhai))?$",
+        r"^come\s+(?:then|outside)\b.*\bi ?ll\s+show\s+(?:u|you)"
+        r"(?:\s+(?:bro|bhai))?$",
+    )
+)
+
+DIRECT_PRESSURE_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"\b(?:u|you|ur|your|you re|youre|tu|tum|tera|teri|tujh|tujhe|"
+        r"tujhse|tere)\b.{0,50}\b(?:scared|afraid|intimidated|coward|"
+        r"pussy|terrified|shook|pressed|rattled|folded|backing down)\b",
+        r"\b(?:scared|afraid|intimidated|coward|pussy|terrified|shook|"
+        r"pressed|rattled|folded|backing down)\b.{0,50}\b"
+        r"(?:u|you|ur|your|you re|youre|tu|tum|tera|teri|tujh|tujhe|"
+        r"tujhse|tere)\b",
+        r"\b(?:darr|dar)\s+gaya\s+kya\b",
+        r"\b(?:fight|fade)\s+(?:me|kar|karega)\b",
+        r"\b(?:pull up|come outside|back down|backing down)\b.{0,30}\b"
+        r"(?:u|you|tu|tum)\b",
+    )
+)
+
+PRESSURE_ONLY_POSTURE_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"\b(?:i ?m|i am|i ain ?t)\s+(?:not\s+|never\s+)?"
+        r"(?:scared|afraid|intimidated|shook|rattled|pressed|bothered)"
+        r"(?:\s+(?:bro|bhai|lmao|lol))?$",
+        r"^(?:(?:nah|no|bro|bhai|lmao|lol)\s+)*"
+        r"(?:i ?m|i am)\s+(?:completely\s+|fully\s+|still\s+)?"
+        r"(?:unbothered|fearless)(?:\s+(?:bro|bhai|lmao|lol))?$",
+        r"^(?:(?:nah|no|bro|bhai|lmao|lol)\s+)*"
+        r"(?:(?:i\s+(?:don ?t|do not|never))|ion)\s+fold"
+        r"(?:\s+(?:for\s+(?:nobody|anybody|u|you)|ever|bro|bhai|lmao|lol))*$",
+        r"^(?:i\s+)?never\s+folded(?:\s+and)?\s+never\s+will"
+        r"(?:\s+(?:bro|bhai|lmao|lol))?$",
+        r"^ain ?t\s+(?:shit|nothing|nobody)\s+(?:gonna\s+)?"
+        r"(?:scare|rattle|press|bother)(?:s)?\s+me"
+        r"(?:\s+(?:bro|bhai|lmao|lol))?$",
+        r"^(?:nothing|nobody)\s+"
+        r"(?:scares|rattles|presses|bothers)\s+me"
+        r"(?:\s+(?:bro|bhai|lmao|lol))?$",
+        r"^i\s+fear\s+(?:nobody|no one|nothing)"
+        r"(?:\s+(?:bro|bhai|lmao|lol))?$",
+        r"^fear\s+(?:ain ?t|isn ?t)\s+in\s+me"
+        r"(?:\s+(?:bro|bhai|lmao|lol))?$",
+        r"^(?:u|you)\s+(?:can ?t|cannot|won ?t|will not)\s+"
+        r"make\s+me\s+fold(?:\s+(?:bro|bhai|lmao|lol))?$",
+        r"^(?:u|you)\s+(?:don ?t|do not|ain ?t|haven ?t|have not)\s+"
+        r"(?:got|have)\s+me\s+(?:pressed|shook|rattled|bothered)"
+        r"(?:\s+(?:bro|bhai|lmao|lol))?$",
+        r"^(?:(?:bro|bhai)\s+)?(?:chill|calm\s+down|relax)"
+        r"(?:\s+(?:bro|bhai))?$",
+        r"\bi\s+(?:was|wasn ?t)\s+(?:only\s+|just\s+)?"
+        r"(?:joking|playing)(?:\s+(?:bro|bhai))?$",
+        r"\b(?:that|this|ts)\s+(?:didn ?t|did not|doesn ?t|does not)\s+"
+        r"(?:scare|intimidate|rattle|press|bother)\s+me\b",
+        r"^(?:i ?ll|i will|i ?m gonna|i am gonna)\s+pull up"
+        r"(?:\s+(?:rn|now))?$",
+    )
+)
+
 
 def _novelty_ratio(left: str, right: str) -> float:
     return SequenceMatcher(None, left, right, autojunk=False).ratio()
+
+
+def _has_direct_pressure(user_text: str) -> bool:
+    normalized = normalize_reply_for_novelty(user_text)
+    return any(pattern.search(normalized) for pattern in DIRECT_PRESSURE_PATTERNS)
+
+
+CONTINUATION_MESSAGES = frozenset(
+    {
+        "exactly",
+        "yeah",
+        "yea",
+        "yep",
+        "yup",
+        "nah",
+        "fr",
+        "frfr",
+        "right",
+        "literally",
+        "see",
+        "true",
+        "lmao",
+        "lol",
+        "and",
+        "so",
+        "then",
+        "thought so",
+        "knew it",
+        "called it",
+        "thats what i said",
+        "thats what im saying",
+    }
+)
+
+
+def build_posture_context(
+    user_text: str,
+    previous_history: list[dict[str, str]],
+) -> str:
+    """Carry direct pressure across only a tiny continuation message."""
+    normalized = normalize_reply_for_novelty(user_text)
+    words = normalized.split()
+    continuation = not words or normalized in CONTINUATION_MESSAGES
+    if not continuation or _has_direct_pressure(user_text):
+        return user_text
+    previous_user_text = next(
+        (
+            str(turn.get("content") or "")
+            for turn in reversed(previous_history)
+            if turn.get("role") == "user"
+        ),
+        "",
+    )
+    if not previous_user_text:
+        return user_text
+    return f"{previous_user_text}\n{user_text}"
+
+
+def violates_zombie_posture(reply: str, user_text: str = "") -> bool:
+    """Detect narrow persona breaks while preserving normal human nuance."""
+    cleaned = sanitize_model_reply(reply)
+    pressure_context = _has_direct_pressure(user_text)
+    for bubble in cleaned.split(CANONICAL_DOUBLE_MARKER):
+        normalized = normalize_reply_for_novelty(bubble)
+        if not normalized:
+            continue
+        if any(pattern.search(normalized) for pattern in POSTURE_BREAK_PATTERNS):
+            return True
+        if pressure_context and any(
+            pattern.search(normalized) for pattern in PRESSURE_ONLY_POSTURE_PATTERNS
+        ):
+            return True
+    return False
 
 
 def is_unoriginal_reply(
@@ -1185,20 +1445,39 @@ def build_turn_system_prompt(
             and current_turn - state.last_offensive_flip_turn >= OFFENSIVE_FLIP_MIN_GAP
         )
         flip = eligible and random.random() < OFFENSIVE_FLIP_CHANCE
-        if flip:
-            state.last_offensive_flip_turn = current_turn
+        state.pending_offensive_flip_turn = current_turn if flip else None
 
     if not flip:
         return ANSH_SYSTEM_PROMPT
     return (
         ANSH_SYSTEM_PROMPT
         + "\n\nPRIVATE TURN MODE\n"
-        + "Abruptly become disproportionately irritated, vulgar, and sharper "
-        + "this turn while reacting to one real detail in the newest message. "
+        + "Abruptly become colder, extra vulgar, and ruthless this turn while "
+        + "reacting to one real detail in the newest message. The switch is "
+        + "controlled and sudden, never defensive, frantic, or performatively tough. "
         + "Construct a fresh Delhi-gaali response rather than retrieving a phrase. "
-        + "Keep it verbal, coherent, and non-actionable. Do not announce the mood "
-        + "change or mention this directive."
+        + "Keep calm social control: no fear denial, self-justification, pleading, "
+        + "or toughness speech. Keep it verbal, coherent, and non-actionable. Do "
+        + "not announce the mood change or mention this directive."
     )
+
+
+def commit_pending_offensive_flip(sender_id: str) -> None:
+    """Start the flip cooldown only after an Instagram reply is retained."""
+    with sender_activity_lock:
+        state = sender_activity.get(sender_id)
+        if state is None or state.pending_offensive_flip_turn is None:
+            return
+        state.last_offensive_flip_turn = state.pending_offensive_flip_turn
+        state.pending_offensive_flip_turn = None
+
+
+def clear_pending_offensive_flip(sender_id: str) -> None:
+    """Discard a mode selected for an earlier turn that never reached Instagram."""
+    with sender_activity_lock:
+        state = sender_activity.get(sender_id)
+        if state is not None:
+            state.pending_offensive_flip_turn = None
 
 
 def _request_claude(
@@ -1239,6 +1518,7 @@ def _record_claude_failure(exc: Exception) -> None:
 def generate_reply(sender_id: str, user_text: str) -> str:
     identity = fixed_identity_reply(user_text)
     if identity:
+        clear_pending_offensive_flip(sender_id)
         return identity
 
     with conversation_lock:
@@ -1248,6 +1528,7 @@ def generate_reply(sender_id: str, user_text: str) -> str:
     # the current user message so Anthropic never receives an assistant-first list.
     previous_history = previous_history[-MAX_TURNS:]
     prompt_history = previous_history + [{"role": "user", "content": user_text}]
+    posture_context = build_posture_context(user_text, previous_history)
     system_prompt = build_turn_system_prompt(sender_id, previous_history)
 
     if not claude_client:
@@ -1255,8 +1536,11 @@ def generate_reply(sender_id: str, user_text: str) -> str:
             raise SilentDrop("claude_not_configured", counts_as_spam=False)
         log.warning("Anthropic key missing; using explicit local-only fallback")
         fallback = sanitize_model_reply(fallback_reply(user_text, sender_id))
-        if not claim_original_reply(sender_id, fallback):
+        if violates_zombie_posture(
+            fallback, posture_context
+        ) or not claim_original_reply(sender_id, fallback):
             raise SilentDrop("fallback_exhausted", counts_as_spam=False)
+        clear_pending_offensive_flip(sender_id)
         return fallback
 
     try:
@@ -1273,21 +1557,35 @@ def generate_reply(sender_id: str, user_text: str) -> str:
     first_draft = sanitize_model_reply(first_draft)
     if not first_draft:
         raise SilentDrop("empty_claude_reply", counts_as_spam=False)
-    if claim_original_reply(sender_id, first_draft):
+    posture_failure = violates_zombie_posture(first_draft, posture_context)
+    originality_failure = False
+    if not posture_failure:
+        originality_failure = not claim_original_reply(sender_id, first_draft)
+    if not posture_failure and not originality_failure:
         return first_draft
 
-    update_stats(repeated_drafts_rejected=1, novelty_retries=1)
+    if posture_failure:
+        update_stats(persona_drafts_rejected=1)
+        retry_instruction = (
+            "The previous draft failed a private persona-posture check. Rewrite "
+            "from calm social control while answering one concrete detail in the "
+            "latest real message. Do not deny fear, describe your emotions, "
+            "apologise or placate, explain your intent, ask them to calm down, or "
+            "boast to prove toughness. A short unfazed counter is stronger than a "
+            "speech. Keep aggression verbal and non-actionable. Do not mention the "
+            "draft, the check, or this instruction."
+        )
+    else:
+        update_stats(repeated_drafts_rejected=1, novelty_retries=1)
+        retry_instruction = (
+            "The previous draft failed a private originality check. Reply again "
+            "to the latest real message from a genuinely different angle. Change "
+            "the opening, syntax, observation, and punchline. Do not mention the "
+            "draft, the check, or this instruction."
+        )
     retry_messages = prompt_history + [
         {"role": "assistant", "content": first_draft},
-        {
-            "role": "user",
-            "content": (
-                "The previous draft failed a private originality check. Reply "
-                "again to the latest real message from a genuinely different "
-                "angle. Change the opening, syntax, observation, and punchline. "
-                "Do not mention the draft, the check, or this instruction."
-            ),
-        },
+        {"role": "user", "content": retry_instruction},
     ]
     try:
         retry_draft = _request_claude(retry_messages, system_prompt)
@@ -1301,10 +1599,13 @@ def generate_reply(sender_id: str, user_text: str) -> str:
         ) from exc
 
     retry_draft = sanitize_model_reply(retry_draft)
-    if not retry_draft or not claim_original_reply(sender_id, retry_draft):
-        update_stats(
-            repeated_drafts_rejected=1,
-        )
+    if not retry_draft:
+        raise SilentDrop("empty_claude_retry", counts_as_spam=False)
+    if violates_zombie_posture(retry_draft, posture_context):
+        update_stats(persona_drafts_rejected=1)
+        raise SilentDrop("persona_posture_failure", counts_as_spam=False)
+    if not claim_original_reply(sender_id, retry_draft):
+        update_stats(repeated_drafts_rejected=1)
         raise SilentDrop("unoriginal_reply", counts_as_spam=False)
     return retry_draft
 
@@ -1362,6 +1663,7 @@ def remember_successful_turn(
         )
         conversations[sender_id] = history[-MAX_TURNS:]
     remember_recent_bot_reply(sender_id, reply)
+    commit_pending_offensive_flip(sender_id)
     return True
 
 
