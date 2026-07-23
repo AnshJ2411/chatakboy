@@ -1,4 +1,4 @@
-"""Instagram DM auto-responder using Meta webhooks and Gemini.
+"""Instagram DM auto-responder using Meta webhooks and Claude.
 
 Render start command (one process; threads are fine):
     gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120 --access-logfile -
@@ -10,8 +10,8 @@ Required environment variables:
     META_APP_SECRET
 
 Optional environment variables:
-    GEMINI_API_KEY             # falls back to simple replies when absent/failing
-    GEMINI_MODEL=gemini-3.5-flash-lite
+    ANTHROPIC_API_KEY          # falls back to simple replies when absent/failing
+    CLAUDE_MODEL=claude-haiku-4-5-20251001
     GRAPH_API_VERSION=v25.0
     DIAGNOSTIC_TOKEN           # protects /diagnostics and /diagnostics/meta
     LOG_LEVEL=INFO
@@ -28,14 +28,15 @@ import random
 import re
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
 import requests
+from anthropic import Anthropic
 from flask import Flask, jsonify, request
-from google import genai
-from google.genai import types
 
 
 logging.basicConfig(
@@ -57,8 +58,9 @@ IG_ACCOUNT_ID = env("IG_ACCOUNT_ID")
 META_APP_SECRET = env("META_APP_SECRET")
 DIAGNOSTIC_TOKEN = env("DIAGNOSTIC_TOKEN")
 
-GEMINI_API_KEY = env("GEMINI_API_KEY")
-GEMINI_MODEL = env("GEMINI_MODEL", "gemini-3.5-flash-lite")
+ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY")
+CLAUDE_MODEL = env("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+CLAUDE_MAX_TOKENS = max(32, min(300, int(env("CLAUDE_MAX_TOKENS", "120"))))
 
 GRAPH_API_VERSION = env("GRAPH_API_VERSION", "v25.0")
 if not GRAPH_API_VERSION.startswith("v"):
@@ -68,13 +70,51 @@ if not re.fullmatch(r"v\d+\.\d+", GRAPH_API_VERSION):
 
 MAX_TURNS = max(2, int(env("MAX_TURNS", "12")))
 DEDUPE_TTL_SECONDS = max(3600, int(env("DEDUPE_TTL_SECONDS", "172800")))
-MAX_PENDING_MESSAGES = max(10, int(env("MAX_PENDING_MESSAGES", "100")))
+MAX_PENDING_MESSAGES = max(10, int(env("MAX_PENDING_MESSAGES", "50")))
+
+# These checks run before any paid model request. Defaults are intentionally
+# conservative and can be tuned from Render without another deploy.
+MAX_USER_TEXT_CHARS = max(100, int(env("MAX_USER_TEXT_CHARS", "1200")))
+SPAM_BURST_WINDOW_SECONDS = max(
+    5,
+    int(env("SPAM_BURST_WINDOW_SECONDS", "30")),
+)
+SPAM_BURST_MAX_MESSAGES = max(2, int(env("SPAM_BURST_MAX_MESSAGES", "5")))
+SPAM_REPEAT_WINDOW_SECONDS = max(
+    60,
+    int(env("SPAM_REPEAT_WINDOW_SECONDS", "600")),
+)
+SPAM_REPEAT_MAX_MESSAGES = max(1, int(env("SPAM_REPEAT_MAX_MESSAGES", "2")))
+SPAM_COOLDOWN_SECONDS = max(300, int(env("SPAM_COOLDOWN_SECONDS", "21600")))
+SESSION_IDLE_SECONDS = max(300, int(env("SESSION_IDLE_SECONDS", "3600")))
+SESSION_COOLDOWN_SECONDS = max(
+    300,
+    int(env("SESSION_COOLDOWN_SECONDS", "21600")),
+)
+MAX_REPLIES_PER_SESSION = max(1, int(env("MAX_REPLIES_PER_SESSION", "20")))
+MAX_REPLIES_PER_24H = max(1, int(env("MAX_REPLIES_PER_24H", "60")))
+MAX_GLOBAL_CLAUDE_CALLS_PER_MINUTE = max(
+    1,
+    int(env("MAX_GLOBAL_CLAUDE_CALLS_PER_MINUTE", "20")),
+)
+MAX_GLOBAL_CLAUDE_CALLS_PER_24H = max(
+    1,
+    int(env("MAX_GLOBAL_CLAUDE_CALLS_PER_24H", "300")),
+)
 
 SEND_URL = f"https://graph.instagram.com/{GRAPH_API_VERSION}/{IG_ACCOUNT_ID}/messages"
 ACCOUNT_URL = f"https://graph.instagram.com/{GRAPH_API_VERSION}/{IG_ACCOUNT_ID}"
 SUBSCRIPTIONS_URL = f"{ACCOUNT_URL}/subscribed_apps"
 
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+claude_client = (
+    Anthropic(
+        api_key=ANTHROPIC_API_KEY,
+        timeout=30.0,
+        max_retries=0,
+    )
+    if ANTHROPIC_API_KEY
+    else None
+)
 executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ig-worker")
 pending_message_slots = threading.BoundedSemaphore(MAX_PENDING_MESSAGES)
 http_local = threading.local()
@@ -140,6 +180,25 @@ user_locks_lock = threading.Lock()
 seen_events: dict[str, float] = {}
 seen_events_lock = threading.Lock()
 
+
+@dataclass
+class SenderActivity:
+    incoming_times: deque[float] = field(default_factory=deque)
+    repeat_times: dict[str, deque[float]] = field(default_factory=dict)
+    reply_times: deque[float] = field(default_factory=deque)
+    session_replies: int = 0
+    session_last_reply_at: float = 0.0
+    blocked_until: float = 0.0
+    last_seen_at: float = 0.0
+
+
+sender_activity: dict[str, SenderActivity] = {}
+sender_activity_lock = threading.RLock()
+
+global_claude_call_times: deque[float] = deque()
+global_claude_budget_lock = threading.Lock()
+
+
 stats: dict[str, Any] = {
     "webhooks_received": 0,
     "text_events_found": 0,
@@ -147,6 +206,10 @@ stats: dict[str, Any] = {
     "messages_processed": 0,
     "replies_sent": 0,
     "ignored_events": 0,
+    "spam_silenced": 0,
+    "claude_calls": 0,
+    "claude_input_tokens": 0,
+    "claude_output_tokens": 0,
     "errors": 0,
     "last_webhook_at": None,
     "last_reply_at": None,
@@ -162,6 +225,10 @@ COUNTER_STATS = {
     "messages_processed",
     "replies_sent",
     "ignored_events",
+    "spam_silenced",
+    "claude_calls",
+    "claude_input_tokens",
+    "claude_output_tokens",
     "errors",
 }
 
@@ -544,9 +611,172 @@ def is_data_deletion_request(user_text: str) -> bool:
     }
 
 
+class SilentDrop(RuntimeError):
+    """Stop processing without sending anything to the Instagram user."""
+
+
+def prune_times(values: deque[float], cutoff: float) -> None:
+    while values and values[0] < cutoff:
+        values.popleft()
+
+
+def normalized_spam_text(user_text: str) -> str:
+    text = user_text.lower()
+    text = re.sub(r"https?://\S+|www\.\S+", "<url>", text)
+    text = re.sub(r"[^a-z0-9<>]+", " ", text)
+    return " ".join(text.split())[:240]
+
+
+def content_spam_reason(user_text: str) -> str | None:
+    stripped = user_text.strip()
+    if len(stripped) > MAX_USER_TEXT_CHARS:
+        return "oversized_text"
+    if len(re.findall(r"https?://|www\.", stripped, flags=re.IGNORECASE)) >= 4:
+        return "link_flood"
+    if re.search(r"(.)\1{19,}", stripped.lower()):
+        return "character_flood"
+
+    words = re.findall(r"[a-z0-9]+", stripped.lower())
+    if len(words) >= 10 and len(set(words)) <= 2:
+        return "word_flood"
+    if len(stripped) >= 12 and not words:
+        return "symbol_flood"
+    return None
+
+
+def cleanup_sender_activity(now: float) -> None:
+    if len(sender_activity) <= 5000:
+        return
+    cutoff = now - 86400
+    stale = [
+        sender_id
+        for sender_id, state in sender_activity.items()
+        if state.last_seen_at < cutoff and state.blocked_until < now
+    ]
+    for sender_id in stale:
+        sender_activity.pop(sender_id, None)
+
+
+def inspect_incoming_message(
+    sender_id: str,
+    user_text: str,
+    *,
+    now: float | None = None,
+) -> str | None:
+    """Return a silent-drop reason before the message reaches a paid model."""
+    if is_data_deletion_request(user_text):
+        return None
+
+    current = time.time() if now is None else now
+    direct_reason = content_spam_reason(user_text)
+    fingerprint = normalized_spam_text(user_text)
+
+    with sender_activity_lock:
+        cleanup_sender_activity(current)
+        state = sender_activity.setdefault(sender_id, SenderActivity())
+        state.last_seen_at = current
+
+        if state.blocked_until > current:
+            return "cooldown"
+
+        if direct_reason:
+            state.blocked_until = current + SPAM_COOLDOWN_SECONDS
+            return direct_reason
+
+        prune_times(
+            state.incoming_times,
+            current - SPAM_BURST_WINDOW_SECONDS,
+        )
+        state.incoming_times.append(current)
+        if len(state.incoming_times) > SPAM_BURST_MAX_MESSAGES:
+            state.blocked_until = current + SPAM_COOLDOWN_SECONDS
+            return "burst"
+
+        if fingerprint:
+            repeat_times = state.repeat_times.setdefault(fingerprint, deque())
+            prune_times(
+                repeat_times,
+                current - SPAM_REPEAT_WINDOW_SECONDS,
+            )
+            repeat_times.append(current)
+            if len(repeat_times) > SPAM_REPEAT_MAX_MESSAGES:
+                state.blocked_until = current + SPAM_COOLDOWN_SECONDS
+                return "repeat"
+
+        if len(state.repeat_times) > 100:
+            stale_fingerprints = [
+                value
+                for value, timestamps in state.repeat_times.items()
+                if not timestamps
+                or timestamps[-1] < current - SPAM_REPEAT_WINDOW_SECONDS
+            ]
+            for value in stale_fingerprints:
+                state.repeat_times.pop(value, None)
+
+    return None
+
+
+def reserve_reply_budget(
+    sender_id: str,
+    *,
+    now: float | None = None,
+) -> str | None:
+    """Reserve one reply slot or return the reason for staying silent."""
+    current = time.time() if now is None else now
+    with sender_activity_lock:
+        state = sender_activity.setdefault(sender_id, SenderActivity())
+        state.last_seen_at = current
+
+        if state.blocked_until > current:
+            return "cooldown"
+
+        prune_times(state.reply_times, current - 86400)
+        if len(state.reply_times) >= MAX_REPLIES_PER_24H:
+            state.blocked_until = max(
+                current + 300,
+                state.reply_times[0] + 86400,
+            )
+            return "sender_daily_cap"
+
+        if (
+            not state.session_last_reply_at
+            or current - state.session_last_reply_at >= SESSION_IDLE_SECONDS
+        ):
+            state.session_replies = 0
+
+        if state.session_replies >= MAX_REPLIES_PER_SESSION:
+            state.blocked_until = current + SESSION_COOLDOWN_SECONDS
+            return "session_cap"
+
+        state.session_replies += 1
+        state.session_last_reply_at = current
+        state.reply_times.append(current)
+    return None
+
+
+def reserve_global_claude_budget(*, now: float | None = None) -> str | None:
+    """Reserve one paid call globally or silently stop before Anthropic."""
+    current = time.time() if now is None else now
+    with global_claude_budget_lock:
+        prune_times(global_claude_call_times, current - 86400)
+        calls_last_minute = sum(
+            timestamp >= current - 60 for timestamp in global_claude_call_times
+        )
+        if calls_last_minute >= MAX_GLOBAL_CLAUDE_CALLS_PER_MINUTE:
+            return "global_minute_cap"
+        if len(global_claude_call_times) >= MAX_GLOBAL_CLAUDE_CALLS_PER_24H:
+            return "global_daily_cap"
+        global_claude_call_times.append(current)
+
+    update_stats(claude_calls=1)
+    return None
+
+
 def forget_conversation(sender_id: str) -> None:
     with conversation_lock:
         conversations.pop(sender_id, None)
+    with sender_activity_lock:
+        sender_activity.pop(sender_id, None)
 
 
 def generate_reply(sender_id: str, user_text: str) -> str:
@@ -560,37 +790,40 @@ def generate_reply(sender_id: str, user_text: str) -> str:
     prompt_history = previous_history + [{"role": "user", "content": user_text}]
     prompt_history = prompt_history[-MAX_TURNS:]
 
-    if not gemini_client:
-        log.warning("Gemini key missing; using fallback reply")
+    if not claude_client:
+        log.warning("Anthropic key missing; using fallback reply")
         return fallback_reply(user_text)
 
-    contents = [
-        types.Content(
-            role="model" if turn["role"] == "assistant" else "user",
-            parts=[types.Part.from_text(text=turn["content"])],
-        )
-        for turn in prompt_history
-    ]
+    budget_reason = reserve_global_claude_budget()
+    if budget_reason:
+        raise SilentDrop(budget_reason)
 
     try:
-        log.info("Generating Gemini reply model=%s", GEMINI_MODEL)
-        response = gemini_client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=ANSH_SYSTEM_PROMPT,
-                max_output_tokens=160,
-                temperature=0.9,
-            ),
+        log.info("Generating Claude reply model=%s", CLAUDE_MODEL)
+        response = claude_client.messages.create(
+            model=CLAUDE_MODEL,
+            system=ANSH_SYSTEM_PROMPT,
+            messages=prompt_history,
+            max_tokens=CLAUDE_MAX_TOKENS,
+            temperature=0.9,
         )
-        reply = (response.text or "").strip()
+        reply = "".join(
+            block.text
+            for block in response.content
+            if getattr(block, "type", "") == "text"
+        ).strip()
+        usage = getattr(response, "usage", None)
+        update_stats(
+            claude_input_tokens=getattr(usage, "input_tokens", 0) or 0,
+            claude_output_tokens=getattr(usage, "output_tokens", 0) or 0,
+        )
         if not reply:
             reply = fallback_reply(user_text)
     except Exception as exc:
-        log.exception("Gemini generation failed; using fallback reply")
+        log.exception("Claude generation failed; using fallback reply")
         update_stats(
             errors=1,
-            last_error=f"Gemini: {type(exc).__name__}: {exc}",
+            last_error=f"Claude: {type(exc).__name__}: {exc}",
         )
         reply = fallback_reply(user_text)
 
@@ -793,6 +1026,9 @@ def process_message(sender_id: str, user_text: str, event_key: str) -> None:
                     forget_conversation(sender_id)
                     send_message(sender_id, "done ur chat history is deleted")
                 else:
+                    budget_reason = reserve_reply_budget(sender_id)
+                    if budget_reason:
+                        raise SilentDrop(budget_reason)
                     reply = generate_reply(sender_id, user_text)
                     bubbles = apply_double_text_cooldown(
                         sender_id,
@@ -813,6 +1049,14 @@ def process_message(sender_id: str, user_text: str, event_key: str) -> None:
                         user_text,
                         "\n".join(bubbles),
                     )
+            except SilentDrop as exc:
+                update_stats(messages_processed=1, spam_silenced=1)
+                log.info(
+                    "Silently stopped DM sender_suffix=%s reason=%s",
+                    sender_id[-6:],
+                    str(exc),
+                )
+                return
             except Exception as exc:
                 if delivered_bubbles and not deletion_requested:
                     remember_successful_turn(
@@ -953,7 +1197,7 @@ def health() -> tuple[Any, int]:
         jsonify(
             status="ok" if not missing else "configuration_incomplete",
             missing=missing,
-            gemini=("configured" if GEMINI_API_KEY else "fallback_only"),
+            claude=("configured" if ANTHROPIC_API_KEY else "fallback_only"),
             meta_credentials=(
                 "configured_not_live_validated" if not missing else "incomplete"
             ),
@@ -985,11 +1229,26 @@ def diagnostics() -> tuple[Any, int]:
     return (
         jsonify(
             status="ok",
-            gemini=("configured" if GEMINI_API_KEY else "fallback_only"),
-            gemini_model=GEMINI_MODEL,
+            claude=("configured" if ANTHROPIC_API_KEY else "fallback_only"),
+            claude_model=CLAUDE_MODEL,
+            claude_max_tokens=CLAUDE_MAX_TOKENS,
             graph_api_version=GRAPH_API_VERSION,
             instagram_account_id_configured=bool(IG_ACCOUNT_ID),
             max_pending_messages=MAX_PENDING_MESSAGES,
+            credit_guard={
+                "max_user_text_chars": MAX_USER_TEXT_CHARS,
+                "burst_max_messages": SPAM_BURST_MAX_MESSAGES,
+                "burst_window_seconds": SPAM_BURST_WINDOW_SECONDS,
+                "repeat_max_messages": SPAM_REPEAT_MAX_MESSAGES,
+                "max_replies_per_session": MAX_REPLIES_PER_SESSION,
+                "max_replies_per_24h": MAX_REPLIES_PER_24H,
+                "max_global_claude_calls_per_minute": (
+                    MAX_GLOBAL_CLAUDE_CALLS_PER_MINUTE
+                ),
+                "max_global_claude_calls_per_24h": (
+                    MAX_GLOBAL_CLAUDE_CALLS_PER_24H
+                ),
+            },
             stats=current_stats,
         ),
         200,
@@ -1058,6 +1317,15 @@ def handle_webhook() -> tuple[Any, int]:
         found += 1
         if not reserve_event(event_key):
             duplicates += 1
+            continue
+        spam_reason = inspect_incoming_message(sender_id, text)
+        if spam_reason:
+            update_stats(spam_silenced=1)
+            log.info(
+                "Silently ignored DM before queue sender_suffix=%s reason=%s",
+                sender_id[-6:],
+                spam_reason,
+            )
             continue
         try:
             if not submit_message(sender_id, text, event_key):
