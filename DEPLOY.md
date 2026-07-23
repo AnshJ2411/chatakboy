@@ -84,11 +84,12 @@ seconds are combined into one Claude turn. The first reply arrives about `2.5`
 to `8.5` seconds after the latest accepted DM, including Claude's own response
 time; a deliberate second bubble waits another `1.0` to `3.2` seconds.
 
-The originality guard may make exactly one additional paid Claude request when
-the first draft repeats recent wording. Both calls count toward the global
-credit limits. If the replacement is still repetitive, or if Claude fails,
-times out, or returns empty output, the bot stays silent rather than sending a
-canned fallback.
+The shared quality guard may make exactly one additional paid Claude request
+when the first draft repeats recent wording or unmistakably breaks Zombie's
+unfazed posture. Both calls count toward the global credit limits; no incoming
+message can trigger a third call. If the replacement still fails either check,
+or if Claude fails, times out, or returns empty output, the bot stays silent
+rather than sending a canned fallback.
 
 The protected `/diagnostics` route reports:
 
@@ -100,6 +101,7 @@ stats.spam_silenced
 stats.replies_sent
 stats.novelty_retries
 stats.repeated_drafts_rejected
+stats.persona_drafts_rejected
 stats.messages_coalesced
 stats.silent_failures
 ```
