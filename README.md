@@ -7,8 +7,8 @@ An Instagram DM auto-responder using:
 - A Render web service
 
 The webhook acknowledges Meta immediately, deduplicates events, silently rejects
-spam before it reaches Anthropic, and handles accepted messages in background
-workers.
+spam before it reaches Anthropic, briefly combines rapid follow-up DMs from the
+same sender, and handles accepted conversations in per-sender background queues.
 
 ## Paid-model protection
 
@@ -26,6 +26,9 @@ before every model request:
   24 hours;
 - Anthropic SDK retries are disabled, preventing a hidden second paid request
   after an ambiguous timeout;
+- an originality check can make one additional paid Claude request only when
+  the first draft repeats a recent or blocked reply; if that replacement is
+  still repetitive, the bot stays silent;
 - output is capped at 120 tokens.
 
 The sender is never told that spam or a spending limit was detected. The bot
@@ -51,9 +54,31 @@ The default Claude model is:
 claude-haiku-4-5-20251001
 ```
 
-If the Anthropic key is absent or Claude fails, the app can send a limited
-rule-based fallback response rather than crashing. A global or sender credit
-limit does not use the fallback; it stays silent.
+If Claude fails, times out, returns an empty response, or cannot produce an
+original replacement, the production bot stays silent instead of sending a
+canned fallback. A global or sender credit limit also stays silent.
+`ALLOW_LOCAL_FALLBACK` defaults to `false`; its small fallback is for offline
+development only and must not be enabled on Render.
+
+## Conversation quality and pacing
+
+- `MAX_TURNS=20` supplies up to ten recent user/assistant exchanges to Claude.
+- Messages from the same sender are processed in order. DMs arriving within
+  `0.8` seconds are combined into one turn, which avoids unnecessary paid calls
+  for natural double texts.
+- The first reply is timed to arrive about `2.5` to `8.5` seconds after the
+  latest accepted DM was received. Claude processing time counts toward this
+  total, so the delay does not stack on top of a slow model response.
+- When Claude intentionally returns a two-bubble reply, the second bubble waits
+  `1.0` to `3.2` seconds.
+- A private aggressive mood mode has a `0.13` chance on an eligible turn and a
+  minimum gap of five persona turns. It remains contextual and is never
+  announced to the sender.
+- A 250-entry, 24-hour recent-reply cache detects repeated bot phrasing across
+  conversations. The cache stores bot output fingerprints, not incoming DMs.
+
+These timings are for perceived human pacing; the webhook still acknowledges
+Meta immediately.
 
 ## Render configuration
 
@@ -74,6 +99,17 @@ Before deploying the provider migration:
 
 ```text
 CLAUDE_MAX_TOKENS=120
+MAX_TURNS=20
+WORKER_THREADS=6
+MESSAGE_COALESCE_SECONDS=0.8
+MIN_REPLY_DELAY_SECONDS=2.5
+MAX_REPLY_DELAY_SECONDS=8.5
+DOUBLE_TEXT_DELAY_MIN_SECONDS=1.0
+DOUBLE_TEXT_DELAY_MAX_SECONDS=3.2
+OFFENSIVE_FLIP_CHANCE=0.13
+OFFENSIVE_FLIP_MIN_GAP=5
+RECENT_REPLY_CACHE_SIZE=250
+RECENT_REPLY_TTL_SECONDS=86400
 MAX_USER_TEXT_CHARS=1200
 SPAM_BURST_WINDOW_SECONDS=30
 SPAM_BURST_MAX_MESSAGES=5
@@ -86,11 +122,13 @@ MAX_REPLIES_PER_SESSION=20
 MAX_REPLIES_PER_24H=60
 MAX_GLOBAL_CLAUDE_CALLS_PER_MINUTE=20
 MAX_GLOBAL_CLAUDE_CALLS_PER_24H=300
+MAX_SEEN_EVENTS=10000
 ```
 
 `SPAM_COOLDOWN_SECONDS` and `SESSION_COOLDOWN_SECONDS` default to six hours.
 An idle hour starts a fresh conversation session, unless the sender is still in
-a cooldown.
+a cooldown. The optional originality retry is a real Claude call and therefore
+counts toward the same per-minute and rolling 24-hour global call limits.
 
 ## Meta webhook
 
@@ -120,8 +158,14 @@ tunnel.
 
 ## Privacy and operational limits
 
-- Conversation history, spam state, and spend counters are kept only in process
-  memory and reset when Render restarts or sleeps.
+- The bot keeps at most ten recent user/assistant exchanges per sender. This
+  conversation history, the recent-reply cache, spam state, and spend counters
+  live only in process memory and reset when Render restarts or sleeps.
+- Because in-process spend counters reset with the service, set a hard monthly
+  workspace/key spend limit in Anthropic as the final billing backstop. The
+  application limits reduce abuse but are not a substitute for a provider cap.
+- Render's free plan sleeps and is not strict 24/7 hosting. Use an always-on
+  instance if immediate replies and durable in-memory limits matter.
 - Queued messages are lost if the process stops before processing them.
 - Text DMs are supported; media, reactions, and other non-text events are
   ignored.
