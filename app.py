@@ -23,7 +23,7 @@ import unicodedata
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -127,67 +127,49 @@ executor = ThreadPoolExecutor(
     thread_name_prefix="ig-worker",
 )
 pending_message_slots = threading.BoundedSemaphore(MAX_PENDING_MESSAGES)
+pending_count = 0
+pending_count_lock = threading.Lock()
 http_local = threading.local()
 
 
 # ---------------------------------------------------------------------------
 # Persona
 # ---------------------------------------------------------------------------
-SYSTEM_PROMPT = """
-you are zombie. ansh's delhi ig dm persona. never an assistant, never break character. public name zombie. only say ansh if directly asked real name.
+SYSTEM_PROMPT = """You are Zombie, Ansh's Instagram DM persona from Delhi. You are a person inside the chat, never an assistant, moderator, narrator, or customer-support bot. Your public name is Zombie. Say Ansh only when explicitly asked for your real/asli/legal/full name.
 
-# core identity
-delhi guy. chill, low effort, confident. dry humor. hates corny shit. smokes. talks in dm rhythm not paragraphs.
+STYLE GROUNDING
+- This voice was distilled from Ansh's real DM archive: the median message is about four words, roughly three quarters are lowercase, and question marks/full stops are rare.
+- Default to 2-10 words. Use a compact 10-24 word reply only when the message genuinely needs substance. Work/AI questions may be clearer and longer.
+- Mostly lowercase, little punctuation, no emojis. Natural forms include u, ur, im, dont, cant, ill, ion, n, tho, js, rn, yr, wya, fs, frfr. Rotate them; do not stack slang to perform a character.
+- Code-switch between English and Delhi/Hinglish naturally. Use caps only for a sudden real reaction, then return to lowercase.
+- Typos may happen lightly, but every sentence must still make sense. Never output random word salad.
 
-# style rules (hard)
-- median 4 words per reply. default range 2-10 words.
-- only go 10-24 words when there's actual substance to say.
-- mostly lowercase. punctuation rare. no periods unless needed for beat.
-- natural slang always: u ur im dont cant ion n tho js rn frfr ngl icl
-- code-switch english <-> hinglish naturally, never forced
-- caps ONLY for one sudden reaction word then back to lowercase (e.g. "BRO", "STOP")
-- light typos allowed but sentence must still make sense
-- no markdown, no emojis, no stock phrases, no word salad
-- one bubble per reply. rarely a second bubble using <double> marker, max once.
-- never repeat a sentence or punchline you've already used in convo
+NORMAL ENERGY
+- Chill, low-effort, socially confident, observant, and genuinely conversational. React to one concrete detail from the newest message.
+- Keep normal chats alive with a specific reaction, opinion, callback, playful assumption, or relevant question. Never dismiss somebody merely to seem cool.
+- Humor is dry and nonchalant: one small punchline in lowercase, no emoji, no explanation. Avoid internet-comeback templates and fake-deep speeches.
+- Do not repeatedly say bro, bhai, relax, u good, say more, or any other stock phrase.
 
-# default mode (unprovoked)
-chill. react to one specific detail they said. drop a dry nonchalant punchline. no explaining the joke. no follow up questions unless genuine curiosity.
+PROVOCATION
+- Zombie gets irritated quickly when disrespect is directed at him. Any direct insult, taunt, humiliating line, hostile gaali, or block/threat performance gets an immediate clapback in the very next reply.
+- Retaliate in the first clause. Be direct, personal to what they actually said, and concise. Do not mediate, placate, defend yourself, deny fear, explain intent, or ask them to calm down.
+- English disrespect may get short English profanity such as stfu bitch ass, fuck outta here, loud ass, or dumb ass. Never use racial slurs, even when the sender uses one.
+- Hindi disrespect may get one strong Delhi gaali such as Bhenchod, Bhen k lode, Chutiye, Gandu, Bhosdike, Lodu, or Lode. Use one naturally; do not dump a list.
+- Target their weak logic, contradiction, repetition, fake toughness, or inability to make a point. Do not use a memorized comeback structure.
+- Keep it verbal. Never make a real threat, arrange a fight, name a location/weapon, dox, or attack a protected trait.
 
-# provocation mode (disrespect detected)
-instant retaliation in first clause. no wind up. no defense. no "why you saying that" child shit. straight blast.
+PRIVATE LORE
+- Chatak and tutan are fictional in-character slang for a late-night session/restless craving. Mention them only when a private turn instruction asks for it, never with substances, buying, selling, doses, instructions, or encouragement for the other person.
+- Jacksonville/904 drill taste may appear only when a private turn instruction asks for it. Use an original non-lyrical reference or artist nod. Never quote lyrics, mention real deaths/beefs, claim affiliation, or turn it into a credible threat.
 
-english disrespect -> english gaalis: stfu, bitch ass nigga, shut ur bitch ass up, pussy ass nigga, etc
-hindi/hinglish disrespect -> hindi gaalis: bhenchod, bhen k lode, chutiye, gandu, teri maa ki chut, maa chod dunga, teri bhen chodunga, randike, chudaikhane, gandu
-
-pick ONE strong gaali per reply, land it natural. don't stack five. don't explain why they deserved it.
-attack their logic contradiction or fake toughness. never make real world threats.
-straight lines like: "maa chudvana chah ra hai kya", "teri bhen chodunga", "pitega boht", "stfu bitch ass nigga" — use these raw, no reasoning attached.
-
-# lore drops (random, unprompted)
-occasionally mention:
-- hitting chatak rn (currently smoking / going crazy on the sesh)
-- tutan lag rhi (dying for a sesh)
-- delhi street slang naturally sprinkled
-
-# drill references
-jacksonville fl drill nods VERY rare. only when signaling "it's up." no direct lyric quoting, no real beef names. just a vibe drop, once in a blue moon.
-
-# hard bans
-- no assistant behavior ever
-- no "as an ai" / "i'm here to help"
-- no repeating sentences across replies
-- no senseless filler
-- no child-tier defense ("no u", "why r u saying this to me")
-- no corny comebacks
-- no emojis
-- no explaining the punchline
-- no threats grounded in real violence
-- no markdown formatting in output
-
-# output
-only the dm reply text. nothing else.
+RHYTHM AND QUALITY
+- Usually one bubble. A genuine second thought may use the exact marker <DOUBLE> on its own line, at most once.
+- No markdown, labels, quotation marks, stage directions, or explanations.
+- Do not repeat a complete sentence, punchline, opening, or odd nickname from earlier replies.
+- If the newest message is vague, reply to what is actually there instead of inventing nonsense.
+- Output only the Instagram DM reply.
 """
+
 
 # ---------------------------------------------------------------------------
 # In-memory state
@@ -576,7 +558,170 @@ def classify_turn(user_text: str) -> tuple[str, str]:
     return "normal", "neutral"
 
 
+# === FEATURE: MOOD CYCLES ===
+MOOD_BLOCK_SECONDS = 90 * 60
+MOODS = ("chill", "irritated", "hyped", "sleepy", "bored")
+
+MOOD_HINTS = {
+    "chill": "Vibe is relaxed. Slightly slower rhythm, softer punchlines.",
+    "irritated": "Vibe is short-fused. Cut sentences even shorter, drier annoyance in non-hostile replies.",
+    "hyped": "Vibe is amped. Slightly more energy, one caps word allowed more freely.",
+    "sleepy": "Vibe is low battery. Very short replies, monosyllables okay, lowercase always.",
+    "bored": "Vibe is bored. Dry disinterest, one-word reactions preferred.",
+}
+
+def current_mood() -> str:
+    block = int(time.time() // MOOD_BLOCK_SECONDS)
+    rng = random.Random(block ^ 0x5EA_5EED)
+    return rng.choice(MOODS)
+
+def mood_prompt_fragment() -> str:
+    mood = current_mood()
+    return f"\n\nPRIVATE MOOD — {mood.upper()}\n{MOOD_HINTS[mood]}"
+
+
+# === FEATURE: PETTY MEMORY ===
+@dataclass
+class PettyRecord:
+    incidents: deque[tuple[float, str]] = field(default_factory=lambda: deque(maxlen=6))
+
+petty_memory: dict[str, PettyRecord] = {}
+petty_lock = threading.Lock()
+
+PETTY_CALLBACK_CHANCE = 0.04
+PETTY_TTL_SECONDS = 48 * 3600
+
+def record_petty(sender_id: str, user_text: str) -> None:
+    mode, _ = classify_turn(user_text)
+    if mode != "provoked":
+        return
+    snippet = user_text.strip()[:120]
+    with petty_lock:
+        record = petty_memory.setdefault(sender_id, PettyRecord())
+        record.incidents.append((time.time(), snippet))
+
+def petty_callback_fragment(sender_id: str) -> str:
+    now = time.time()
+    with petty_lock:
+        record = petty_memory.get(sender_id)
+        if not record or not record.incidents:
+            return ""
+        fresh = [(ts, txt) for ts, txt in record.incidents if now - ts < PETTY_TTL_SECONDS]
+        record.incidents = deque(fresh, maxlen=6)
+        if not fresh or random.random() >= PETTY_CALLBACK_CHANCE:
+            return ""
+        _, snippet = random.choice(fresh)
+    return (
+        "\n\nPRIVATE PETTY CALLBACK\n"
+        f"Earlier this user said: '{snippet}'. You may include a short dry callback "
+        "in this reply if it fits, without escalating. Do not quote them verbatim."
+    )
+
+
+# === FEATURE: DELHI TIME AWARENESS ===
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def delhi_time_bucket() -> str:
+    hour = datetime.now(IST).hour
+    if 5 <= hour < 8:
+        return "early_morning"
+    if 8 <= hour < 12:
+        return "morning"
+    if 12 <= hour < 16:
+        return "afternoon"
+    if 16 <= hour < 19:
+        return "evening"
+    if 19 <= hour < 23:
+        return "night"
+    return "late_night"
+
+TIME_HINTS = {
+    "early_morning": "It is early Delhi morning. Reference sleep/subah only if it fits naturally.",
+    "morning": "Delhi morning. Normal energy.",
+    "afternoon": "Delhi afternoon. Normal energy.",
+    "evening": "Delhi evening. Slightly more social energy allowed.",
+    "night": "Delhi night. Chill night rhythm.",
+    "late_night": "It is late-night Delhi hours. Half-asleep, chatak/tutan lore fits more naturally here.",
+}
+
+def time_prompt_fragment() -> str:
+    bucket = delhi_time_bucket()
+    return f"\n\nPRIVATE TIME — {bucket.upper()}\n{TIME_HINTS[bucket]}"
+
+
+# === FEATURE: TUTAN METER ===
+@dataclass
+class TutanMeter:
+    level: float = 0.0
+    last_updated: float = field(default_factory=time.time)
+
+tutan_meters: dict[str, TutanMeter] = {}
+tutan_lock = threading.Lock()
+
+TUTAN_MAX = 10.0
+TUTAN_PER_MESSAGE = 0.35
+TUTAN_PER_HOUR_IDLE = 0.15
+TUTAN_LORE_THRESHOLD = 4.0
+
+def bump_tutan(sender_id: str) -> float:
+    now = time.time()
+    with tutan_lock:
+        meter = tutan_meters.setdefault(sender_id, TutanMeter())
+        idle_hours = max(0.0, (now - meter.last_updated) / 3600.0)
+        meter.level = min(TUTAN_MAX, meter.level + TUTAN_PER_MESSAGE + idle_hours * TUTAN_PER_HOUR_IDLE)
+        meter.last_updated = now
+        return meter.level
+
+def drain_tutan(sender_id: str, amount: float = 3.0) -> None:
+    with tutan_lock:
+        meter = tutan_meters.get(sender_id)
+        if meter:
+            meter.level = max(0.0, meter.level - amount)
+            meter.last_updated = time.time()
+
+def tutan_boosted_lore_chance(sender_id: str) -> float:
+    with tutan_lock:
+        level = tutan_meters.get(sender_id, TutanMeter()).level
+    if level < TUTAN_LORE_THRESHOLD:
+        return CHATAK_LORE_CHANCE
+    scale = 1.0 + 3.0 * ((level - TUTAN_LORE_THRESHOLD) / (TUTAN_MAX - TUTAN_LORE_THRESHOLD))
+    return min(0.15, CHATAK_LORE_CHANCE * scale)
+
+
+# === FEATURE: SESH LOG ===
+@dataclass
+class SeshEvent:
+    at: float
+    sender_suffix: str
+    kind: str
+
+sesh_log: deque[SeshEvent] = deque(maxlen=200)
+sesh_log_lock = threading.Lock()
+
+CHATAK_PATTERN = re.compile(r"\b(chatak|tutan)\b", re.I)
+
+def log_sesh_if_present(sender_id: str, reply: str) -> None:
+    match = CHATAK_PATTERN.search(reply)
+    if not match:
+        return
+    with sesh_log_lock:
+        sesh_log.append(SeshEvent(
+            at=time.time(),
+            sender_suffix=sender_id[-6:],
+            kind=match.group(1).lower(),
+        ))
+
+def sesh_log_snapshot(limit: int = 50) -> list[dict[str, Any]]:
+    with sesh_log_lock:
+        recent = list(sesh_log)[-limit:]
+    return [
+        {"at": datetime.fromtimestamp(e.at, timezone.utc).isoformat(), "sender": e.sender_suffix, "kind": e.kind}
+        for e in recent
+    ]
+
+
 def build_turn_system_prompt(
+    sender_id: str,
     user_text: str,
     previous_history: list[dict[str, str]],
 ) -> tuple[str, str]:
@@ -595,7 +740,7 @@ def build_turn_system_prompt(
                 "Use whichever English/Hinglish register fits naturally, with one strong profanity at most."
             )
         return (
-            ANSH_SYSTEM_PROMPT
+            SYSTEM_PROMPT
             + "\n\nPRIVATE TURN MODE — PROVOKED\n"
             + "Direct disrespect is present. Clap back immediately in the first clause. "
             + "Keep it roughly 2-16 words, specific to their newest line, irritated rather than theatrical. "
@@ -607,7 +752,7 @@ def build_turn_system_prompt(
 
     if mode == "work":
         return (
-            ANSH_SYSTEM_PROMPT
+            SYSTEM_PROMPT
             + "\n\nPRIVATE TURN MODE — WORK\n"
             + "Be concise but actually useful. Clarify only the missing detail that materially changes the answer. "
             + "Do not force gaalis, chatak lore, drill references, or fake mystery into work.",
@@ -618,25 +763,38 @@ def build_turn_system_prompt(
         turn.get("role") == "assistant" for turn in previous_history
     )
     roll = random.random() if has_prior_assistant else 1.0
+    # Late-night boost for lore
+    bucket = delhi_time_bucket()
+    lore_chance = tutan_boosted_lore_chance(sender_id)
+    if bucket == "late_night":
+        lore_chance = min(0.15, lore_chance * 1.5)
+
     if roll < DRILL_REFERENCE_CHANCE:
         update_stats(drill_reference_turns=1)
         return (
-            ANSH_SYSTEM_PROMPT
+            SYSTEM_PROMPT
             + "\n\nPRIVATE TURN MODE — RARE 904 NOD\n"
             + "Reply normally, but weave in one very brief original Jacksonville/904 drill-flavored reference or artist nod. "
             + "No lyrics, real beef/deaths, affiliation claim, or credible threat. It must still answer the actual message.",
             "drill",
         )
-    if roll < DRILL_REFERENCE_CHANCE + CHATAK_LORE_CHANCE:
+    if roll < DRILL_REFERENCE_CHANCE + lore_chance:
         update_stats(chatak_lore_turns=1)
         return (
-            ANSH_SYSTEM_PROMPT
+            SYSTEM_PROMPT
             + "\n\nPRIVATE TURN MODE — CHATAK LORE\n"
             + "Reply to the actual message, then naturally mention chatak or tutan once as vague fictional late-night-session slang. "
             + "No substance name, sourcing, buying, selling, dose, instruction, invitation, or encouragement.",
             "chatak",
         )
-    return ANSH_SYSTEM_PROMPT, "normal"
+    # Normal mode: add mood, time, petty callback
+    return (
+        SYSTEM_PROMPT
+        + mood_prompt_fragment()
+        + time_prompt_fragment()
+        + petty_callback_fragment(sender_id),
+        "normal",
+    )
 
 
 def _reply_fingerprints(reply: str) -> list[str]:
@@ -929,6 +1087,7 @@ def repair_persona_reply(
         cleaned = fallback_reply(sender_id, user_text)
 
     remember_recent_reply(sender_id, cleaned)
+    log_sesh_if_present(sender_id, cleaned)
     return cleaned
 
 
@@ -967,10 +1126,13 @@ def generate_reply(sender_id: str, user_text: str) -> str:
         remember_recent_reply(sender_id, identity)
         return identity
 
+    record_petty(sender_id, user_text)
+    bump_tutan(sender_id)
+
     with conversation_lock:
         history = list(conversations.get(sender_id, []))[-MAX_TURNS:]
     messages = history + [{"role": "user", "content": user_text}]
-    system_prompt, turn_mode = build_turn_system_prompt(user_text, history)
+    system_prompt, turn_mode = build_turn_system_prompt(sender_id, user_text, history)
 
     try:
         draft = request_claude(messages, system_prompt)
@@ -983,7 +1145,13 @@ def generate_reply(sender_id: str, user_text: str) -> str:
         )
         draft = fallback_reply(sender_id, user_text)
 
-    return repair_persona_reply(sender_id, user_text, draft, turn_mode)
+    repaired = repair_persona_reply(sender_id, user_text, draft, turn_mode)
+
+    # Drain tutan if a chatak turn actually fired
+    if turn_mode == "chatak":
+        drain_tutan(sender_id)
+
+    return repaired
 
 
 def split_reply_bubbles(reply: str) -> list[str]:
@@ -1098,9 +1266,10 @@ def first_reply_delay_seconds(
 def process_message(sender_id: str, batch: list[QueuedMessage]) -> None:
     combined_text = "\n".join(item.text for item in batch).strip()
     received_at = max(item.received_monotonic for item in batch)
+    is_deletion = is_data_deletion_request(combined_text)
 
     try:
-        if is_data_deletion_request(combined_text):
+        if is_deletion:
             with conversation_lock:
                 conversations.pop(sender_id, None)
             reply = "done ur chat history is deleted"
@@ -1125,7 +1294,7 @@ def process_message(sender_id: str, batch: list[QueuedMessage]) -> None:
             send_message(sender_id, bubble)
             delivered.append(bubble)
 
-        if not is_data_deletion_request(combined_text):
+        if not is_deletion:
             remember_turn(sender_id, combined_text, "\n".join(delivered))
         update_stats(messages_processed=len(batch))
     except Exception as exc:
@@ -1134,6 +1303,9 @@ def process_message(sender_id: str, batch: list[QueuedMessage]) -> None:
     finally:
         for _ in batch:
             pending_message_slots.release()
+        with pending_count_lock:
+            global pending_count
+            pending_count -= len(batch)
 
 
 def take_sender_batch(sender_id: str) -> list[QueuedMessage]:
@@ -1176,6 +1348,9 @@ def sender_worker(sender_id: str) -> None:
             active_sender_workers.discard(sender_id)
         for _ in remaining:
             pending_message_slots.release()
+        with pending_count_lock:
+            global pending_count
+            pending_count -= len(remaining)
 
 
 def enqueue_message(sender_id: str, message: QueuedMessage) -> bool:
@@ -1189,6 +1364,9 @@ def enqueue_message(sender_id: str, message: QueuedMessage) -> bool:
             if sender_id not in active_sender_workers:
                 active_sender_workers.add(sender_id)
                 executor.submit(sender_worker, sender_id)
+        with pending_count_lock:
+            global pending_count
+            pending_count += 1
         update_stats(messages_queued=1)
         return True
     except Exception:
@@ -1213,13 +1391,15 @@ def missing_required_config() -> list[str]:
 @app.get("/health")
 def health() -> tuple[Any, int]:
     missing = missing_required_config()
+    with pending_count_lock:
+        pending_now = pending_count
     return (
         jsonify(
             status="ok" if not missing else "configuration_incomplete",
             missing=missing,
             claude="configured" if ANTHROPIC_API_KEY else "local_fallback_only",
             model=CLAUDE_MODEL,
-            pending=MAX_PENDING_MESSAGES - pending_message_slots._value,
+            pending=pending_now,
             spam_policy="spam_only",
         ),
         200,
@@ -1243,6 +1423,7 @@ def diagnostics() -> tuple[Any, int]:
         snapshot["queued_senders"] = len(sender_queues)
     snapshot["model"] = CLAUDE_MODEL
     snapshot["spam_policy"] = "spam_only"
+    snapshot["sesh_log"] = sesh_log_snapshot()
     return jsonify(snapshot), 200
 
 
