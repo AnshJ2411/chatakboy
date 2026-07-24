@@ -15,7 +15,7 @@ services:
       - key: CLAUDE_MODEL
         value: claude-haiku-4-5-20251001
       - key: CLAUDE_MAX_TOKENS
-        value: "120"
+        value: "140"
       - key: MAX_TURNS
         value: "20"
       - key: WORKER_THREADS
@@ -23,49 +23,37 @@ services:
       - key: MESSAGE_COALESCE_SECONDS
         value: "0.8"
       - key: MIN_REPLY_DELAY_SECONDS
-        value: "2.5"
+        value: "2.0"
       - key: MAX_REPLY_DELAY_SECONDS
-        value: "8.5"
+        value: "7.0"
       - key: DOUBLE_TEXT_DELAY_MIN_SECONDS
-        value: "1.0"
+        value: "0.8"
       - key: DOUBLE_TEXT_DELAY_MAX_SECONDS
-        value: "3.2"
-      - key: OFFENSIVE_FLIP_CHANCE
-        value: "0.13"
-      - key: OFFENSIVE_FLIP_MIN_GAP
-        value: "5"
-      - key: RECENT_REPLY_CACHE_SIZE
-        value: "250"
-      - key: RECENT_REPLY_TTL_SECONDS
-        value: "86400"
+        value: "2.4"
       - key: MAX_PENDING_MESSAGES
-        value: "50"
+        value: "100"
       - key: MAX_SEEN_EVENTS
         value: "10000"
       - key: MAX_USER_TEXT_CHARS
-        value: "1200"
+        value: "1600"
       - key: SPAM_BURST_WINDOW_SECONDS
-        value: "30"
+        value: "20"
       - key: SPAM_BURST_MAX_MESSAGES
-        value: "5"
+        value: "8"
       - key: SPAM_REPEAT_WINDOW_SECONDS
         value: "600"
       - key: SPAM_REPEAT_MAX_MESSAGES
-        value: "2"
+        value: "4"
       - key: SPAM_COOLDOWN_SECONDS
-        value: "21600"
-      - key: SESSION_IDLE_SECONDS
-        value: "3600"
-      - key: SESSION_COOLDOWN_SECONDS
-        value: "21600"
-      - key: MAX_REPLIES_PER_SESSION
-        value: "20"
-      - key: MAX_REPLIES_PER_24H
-        value: "60"
-      - key: MAX_GLOBAL_CLAUDE_CALLS_PER_MINUTE
-        value: "20"
-      - key: MAX_GLOBAL_CLAUDE_CALLS_PER_24H
-        value: "300"
+        value: "900"
+      - key: RECENT_REPLY_CACHE_SIZE
+        value: "350"
+      - key: RECENT_REPLY_TTL_SECONDS
+        value: "86400"
+      - key: CHATAK_LORE_CHANCE
+        value: "0.025"
+      - key: DRILL_REFERENCE_CHANCE
+        value: "0.008"
       - key: VERIFY_TOKEN
         sync: false
       - key: IG_ACCESS_TOKEN
@@ -75,4 +63,6 @@ services:
       - key: META_APP_SECRET
         sync: false
       - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: DIAGNOSTIC_TOKEN
         sync: false
