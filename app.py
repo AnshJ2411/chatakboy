@@ -23,7 +23,7 @@ import unicodedata
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -106,6 +106,10 @@ SPAM_BURST_MAX_MESSAGES = max(5, int(env("SPAM_BURST_MAX_MESSAGES", "8")))
 SPAM_REPEAT_WINDOW_SECONDS = max(
     60, int(env("SPAM_REPEAT_WINDOW_SECONDS", "600"))
 )
+# The max(3, ...) below is a *hard floor*, not a default. Even if the env var
+# is set to 1 or 2, repeats under that count will never trigger a block. If
+# you need stricter repeat detection, drop the floor or expose it as its own
+# env-configurable minimum.
 SPAM_REPEAT_MAX_MESSAGES = max(3, int(env("SPAM_REPEAT_MAX_MESSAGES", "4")))
 SPAM_COOLDOWN_SECONDS = max(60, int(env("SPAM_COOLDOWN_SECONDS", "900")))
 
@@ -558,7 +562,51 @@ def classify_turn(user_text: str) -> tuple[str, str]:
     return "normal", "neutral"
 
 
+# === FEATURE: DELHI TIME AWARENESS ===
+# IST-aware time-of-day context so greetings and openers feel natural.
+# Adds a light hint to the system prompt on normal turns only.
+
+from datetime import timedelta
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def delhi_time_bucket() -> str:
+    hour = datetime.now(IST).hour
+    if 5 <= hour < 8:
+        return "early_morning"
+    if 8 <= hour < 12:
+        return "morning"
+    if 12 <= hour < 16:
+        return "afternoon"
+    if 16 <= hour < 19:
+        return "evening"
+    if 19 <= hour < 23:
+        return "night"
+    return "late_night"  # 23-05
+
+TIME_HINTS = {
+    "early_morning": "It is early Delhi morning. Reference sleep/subah only if it fits naturally.",
+    "morning": "Delhi morning. Normal energy.",
+    "afternoon": "Delhi afternoon. Normal energy.",
+    "evening": "Delhi evening. Slightly more social energy allowed.",
+    "night": "Delhi night. Chill night rhythm.",
+    "late_night": "It is late-night Delhi hours. Half-asleep, chatak/tutan lore fits more naturally here.",
+}
+
+def time_prompt_fragment() -> str:
+    bucket = delhi_time_bucket()
+    return f"\n\nPRIVATE TIME — {bucket.upper()}\n{TIME_HINTS[bucket]}"
+
+# --- HOOK: append time_prompt_fragment() to normal-mode system prompt inside
+#     build_turn_system_prompt(). Optionally boost CHATAK_LORE_CHANCE by 1.5x
+#     when bucket == "late_night".
+
+
 # === FEATURE: MOOD CYCLES ===
+# Persona rotates through moods on a slow clock, biasing reply flavor without
+# breaking the base persona. Mood is deterministic per 90-min block so replies
+# feel consistent across a short session but drift across the day.
+
 MOOD_BLOCK_SECONDS = 90 * 60
 MOODS = ("chill", "irritated", "hyped", "sleepy", "bored")
 
@@ -572,6 +620,7 @@ MOOD_HINTS = {
 
 def current_mood() -> str:
     block = int(time.time() // MOOD_BLOCK_SECONDS)
+    # Seed random per block so mood is stable within the window
     rng = random.Random(block ^ 0x5EA_5EED)
     return rng.choice(MOODS)
 
@@ -579,8 +628,66 @@ def mood_prompt_fragment() -> str:
     mood = current_mood()
     return f"\n\nPRIVATE MOOD — {mood.upper()}\n{MOOD_HINTS[mood]}"
 
+# --- HOOK: in build_turn_system_prompt(), append mood_prompt_fragment() to
+#     the normal branch's returned prompt (skip for work + provoked to keep
+#     those modes tight).
+
+
+# === FEATURE: TUTAN METER ===
+# Per-sender internal "sesh craving" counter. Increments on every incoming
+# message and slowly on wall-clock idle. Feeds into chatak lore probability
+# so drops feel earned instead of purely random.
+
+@dataclass
+class TutanMeter:
+    level: float = 0.0
+    last_updated: float = field(default_factory=time.time)
+
+tutan_meters: dict[str, TutanMeter] = {}
+tutan_lock = threading.Lock()
+
+TUTAN_MAX = 10.0
+TUTAN_PER_MESSAGE = 0.35
+TUTAN_PER_HOUR_IDLE = 0.15
+TUTAN_LORE_THRESHOLD = 4.0
+
+def bump_tutan(sender_id: str) -> float:
+    now = time.time()
+    with tutan_lock:
+        meter = tutan_meters.setdefault(sender_id, TutanMeter())
+        idle_hours = max(0.0, (now - meter.last_updated) / 3600.0)
+        meter.level = min(TUTAN_MAX, meter.level + TUTAN_PER_MESSAGE + idle_hours * TUTAN_PER_HOUR_IDLE)
+        meter.last_updated = now
+        return meter.level
+
+def drain_tutan(sender_id: str, amount: float = 3.0) -> None:
+    with tutan_lock:
+        meter = tutan_meters.get(sender_id)
+        if meter:
+            meter.level = max(0.0, meter.level - amount)
+            meter.last_updated = time.time()
+
+def tutan_boosted_lore_chance(sender_id: str) -> float:
+    with tutan_lock:
+        level = tutan_meters.get(sender_id, TutanMeter()).level
+    if level < TUTAN_LORE_THRESHOLD:
+        return CHATAK_LORE_CHANCE
+    # Scale up to 4x base chance at max tutan
+    scale = 1.0 + 3.0 * ((level - TUTAN_LORE_THRESHOLD) / (TUTAN_MAX - TUTAN_LORE_THRESHOLD))
+    return min(0.15, CHATAK_LORE_CHANCE * scale)
+
+# --- HOOK: in build_turn_system_prompt(), replace the CHATAK_LORE_CHANCE
+#     comparison with tutan_boosted_lore_chance(sender_id).
+#     You'll need to pass sender_id into build_turn_system_prompt.
+# --- HOOK: in generate_reply(), call bump_tutan(sender_id) before the Claude call.
+# --- HOOK: when a chatak lore turn actually fires, call drain_tutan(sender_id).
+
 
 # === FEATURE: PETTY MEMORY ===
+# Track disrespect incidents per sender. On rare later turns, allow a callback
+# to a past insult ("still on that shit from earlier"). Purely additive to the
+# existing history; does not replace conversation memory.
+
 @dataclass
 class PettyRecord:
     incidents: deque[tuple[float, str]] = field(default_factory=lambda: deque(maxlen=6))
@@ -617,83 +724,22 @@ def petty_callback_fragment(sender_id: str) -> str:
         "in this reply if it fits, without escalating. Do not quote them verbatim."
     )
 
-
-# === FEATURE: DELHI TIME AWARENESS ===
-IST = timezone(timedelta(hours=5, minutes=30))
-
-def delhi_time_bucket() -> str:
-    hour = datetime.now(IST).hour
-    if 5 <= hour < 8:
-        return "early_morning"
-    if 8 <= hour < 12:
-        return "morning"
-    if 12 <= hour < 16:
-        return "afternoon"
-    if 16 <= hour < 19:
-        return "evening"
-    if 19 <= hour < 23:
-        return "night"
-    return "late_night"
-
-TIME_HINTS = {
-    "early_morning": "It is early Delhi morning. Reference sleep/subah only if it fits naturally.",
-    "morning": "Delhi morning. Normal energy.",
-    "afternoon": "Delhi afternoon. Normal energy.",
-    "evening": "Delhi evening. Slightly more social energy allowed.",
-    "night": "Delhi night. Chill night rhythm.",
-    "late_night": "It is late-night Delhi hours. Half-asleep, chatak/tutan lore fits more naturally here.",
-}
-
-def time_prompt_fragment() -> str:
-    bucket = delhi_time_bucket()
-    return f"\n\nPRIVATE TIME — {bucket.upper()}\n{TIME_HINTS[bucket]}"
-
-
-# === FEATURE: TUTAN METER ===
-@dataclass
-class TutanMeter:
-    level: float = 0.0
-    last_updated: float = field(default_factory=time.time)
-
-tutan_meters: dict[str, TutanMeter] = {}
-tutan_lock = threading.Lock()
-
-TUTAN_MAX = 10.0
-TUTAN_PER_MESSAGE = 0.35
-TUTAN_PER_HOUR_IDLE = 0.15
-TUTAN_LORE_THRESHOLD = 4.0
-
-def bump_tutan(sender_id: str) -> float:
-    now = time.time()
-    with tutan_lock:
-        meter = tutan_meters.setdefault(sender_id, TutanMeter())
-        idle_hours = max(0.0, (now - meter.last_updated) / 3600.0)
-        meter.level = min(TUTAN_MAX, meter.level + TUTAN_PER_MESSAGE + idle_hours * TUTAN_PER_HOUR_IDLE)
-        meter.last_updated = now
-        return meter.level
-
-def drain_tutan(sender_id: str, amount: float = 3.0) -> None:
-    with tutan_lock:
-        meter = tutan_meters.get(sender_id)
-        if meter:
-            meter.level = max(0.0, meter.level - amount)
-            meter.last_updated = time.time()
-
-def tutan_boosted_lore_chance(sender_id: str) -> float:
-    with tutan_lock:
-        level = tutan_meters.get(sender_id, TutanMeter()).level
-    if level < TUTAN_LORE_THRESHOLD:
-        return CHATAK_LORE_CHANCE
-    scale = 1.0 + 3.0 * ((level - TUTAN_LORE_THRESHOLD) / (TUTAN_MAX - TUTAN_LORE_THRESHOLD))
-    return min(0.15, CHATAK_LORE_CHANCE * scale)
+# --- HOOK: call record_petty(sender_id, user_text) inside generate_reply()
+#     before the Claude call.
+# --- HOOK: append petty_callback_fragment(sender_id) to the normal-mode
+#     system prompt in build_turn_system_prompt().
 
 
 # === FEATURE: SESH LOG ===
+# Internal ring-buffer of chatak/tutan lore mentions with timestamps. Exposed
+# via /diagnostics only. Useful for tuning lore frequency without polluting
+# reply generation.
+
 @dataclass
 class SeshEvent:
     at: float
     sender_suffix: str
-    kind: str
+    kind: str  # "chatak" or "tutan"
 
 sesh_log: deque[SeshEvent] = deque(maxlen=200)
 sesh_log_lock = threading.Lock()
@@ -718,6 +764,9 @@ def sesh_log_snapshot(limit: int = 50) -> list[dict[str, Any]]:
         {"at": datetime.fromtimestamp(e.at, timezone.utc).isoformat(), "sender": e.sender_suffix, "kind": e.kind}
         for e in recent
     ]
+
+# --- HOOK: call log_sesh_if_present(sender_id, cleaned) at the end of
+#     rep
 
 
 def build_turn_system_prompt(
@@ -759,20 +808,24 @@ def build_turn_system_prompt(
             "work",
         )
 
+    normal_prompt = (
+        SYSTEM_PROMPT
+        + time_prompt_fragment()
+        + mood_prompt_fragment()
+        + petty_callback_fragment(sender_id)
+    )
     has_prior_assistant = any(
         turn.get("role") == "assistant" for turn in previous_history
     )
     roll = random.random() if has_prior_assistant else 1.0
-    # Late-night boost for lore
-    bucket = delhi_time_bucket()
     lore_chance = tutan_boosted_lore_chance(sender_id)
-    if bucket == "late_night":
+    if delhi_time_bucket() == "late_night":
         lore_chance = min(0.15, lore_chance * 1.5)
 
     if roll < DRILL_REFERENCE_CHANCE:
         update_stats(drill_reference_turns=1)
         return (
-            SYSTEM_PROMPT
+            normal_prompt
             + "\n\nPRIVATE TURN MODE — RARE 904 NOD\n"
             + "Reply normally, but weave in one very brief original Jacksonville/904 drill-flavored reference or artist nod. "
             + "No lyrics, real beef/deaths, affiliation claim, or credible threat. It must still answer the actual message.",
@@ -780,22 +833,15 @@ def build_turn_system_prompt(
         )
     if roll < DRILL_REFERENCE_CHANCE + lore_chance:
         update_stats(chatak_lore_turns=1)
+        drain_tutan(sender_id)
         return (
-            SYSTEM_PROMPT
+            normal_prompt
             + "\n\nPRIVATE TURN MODE — CHATAK LORE\n"
             + "Reply to the actual message, then naturally mention chatak or tutan once as vague fictional late-night-session slang. "
             + "No substance name, sourcing, buying, selling, dose, instruction, invitation, or encouragement.",
             "chatak",
         )
-    # Normal mode: add mood, time, petty callback
-    return (
-        SYSTEM_PROMPT
-        + mood_prompt_fragment()
-        + time_prompt_fragment()
-        + petty_callback_fragment(sender_id),
-        "normal",
-    )
-
+    return normal_prompt, "normal"
 
 def _reply_fingerprints(reply: str) -> list[str]:
     cleaned = sanitize_reply(reply)
@@ -1121,13 +1167,13 @@ def request_claude(
 
 
 def generate_reply(sender_id: str, user_text: str) -> str:
+    bump_tutan(sender_id)
+    record_petty(sender_id, user_text)
+
     identity = fixed_identity_reply(user_text)
     if identity:
         remember_recent_reply(sender_id, identity)
         return identity
-
-    record_petty(sender_id, user_text)
-    bump_tutan(sender_id)
 
     with conversation_lock:
         history = list(conversations.get(sender_id, []))[-MAX_TURNS:]
@@ -1145,13 +1191,7 @@ def generate_reply(sender_id: str, user_text: str) -> str:
         )
         draft = fallback_reply(sender_id, user_text)
 
-    repaired = repair_persona_reply(sender_id, user_text, draft, turn_mode)
-
-    # Drain tutan if a chatak turn actually fired
-    if turn_mode == "chatak":
-        drain_tutan(sender_id)
-
-    return repaired
+    return repair_persona_reply(sender_id, user_text, draft, turn_mode)
 
 
 def split_reply_bubbles(reply: str) -> list[str]:
@@ -1264,6 +1304,8 @@ def first_reply_delay_seconds(
 
 
 def process_message(sender_id: str, batch: list[QueuedMessage]) -> None:
+    global pending_count
+
     combined_text = "\n".join(item.text for item in batch).strip()
     received_at = max(item.received_monotonic for item in batch)
     is_deletion = is_data_deletion_request(combined_text)
@@ -1272,6 +1314,10 @@ def process_message(sender_id: str, batch: list[QueuedMessage]) -> None:
         if is_deletion:
             with conversation_lock:
                 conversations.pop(sender_id, None)
+            with petty_lock:
+                petty_memory.pop(sender_id, None)
+            with tutan_lock:
+                tutan_meters.pop(sender_id, None)
             reply = "done ur chat history is deleted"
         else:
             reply = generate_reply(sender_id, combined_text)
@@ -1304,9 +1350,7 @@ def process_message(sender_id: str, batch: list[QueuedMessage]) -> None:
         for _ in batch:
             pending_message_slots.release()
         with pending_count_lock:
-            global pending_count
             pending_count -= len(batch)
-
 
 def take_sender_batch(sender_id: str) -> list[QueuedMessage]:
     while True:
@@ -1333,6 +1377,8 @@ def take_sender_batch(sender_id: str) -> list[QueuedMessage]:
 
 
 def sender_worker(sender_id: str) -> None:
+    global pending_count
+
     try:
         while True:
             batch = take_sender_batch(sender_id)
@@ -1349,13 +1395,17 @@ def sender_worker(sender_id: str) -> None:
         for _ in remaining:
             pending_message_slots.release()
         with pending_count_lock:
-            global pending_count
             pending_count -= len(remaining)
 
 
 def enqueue_message(sender_id: str, message: QueuedMessage) -> bool:
+    global pending_count
+
     if not pending_message_slots.acquire(blocking=False):
         return False
+
+    with pending_count_lock:
+        pending_count += 1
 
     try:
         with sender_queue_lock:
@@ -1364,12 +1414,11 @@ def enqueue_message(sender_id: str, message: QueuedMessage) -> bool:
             if sender_id not in active_sender_workers:
                 active_sender_workers.add(sender_id)
                 executor.submit(sender_worker, sender_id)
-        with pending_count_lock:
-            global pending_count
-            pending_count += 1
         update_stats(messages_queued=1)
         return True
     except Exception:
+        with pending_count_lock:
+            pending_count -= 1
         pending_message_slots.release()
         raise
 
