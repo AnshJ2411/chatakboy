@@ -106,18 +106,16 @@ SPAM_BURST_MAX_MESSAGES = max(5, int(env("SPAM_BURST_MAX_MESSAGES", "8")))
 SPAM_REPEAT_WINDOW_SECONDS = max(
     60, int(env("SPAM_REPEAT_WINDOW_SECONDS", "600"))
 )
-# The max(3, ...) below is a *hard floor*, not a default. Even if the env var
-# is set to 1 or 2, repeats under that count will never trigger a block. If
-# you need stricter repeat detection, drop the floor or expose it as its own
-# env-configurable minimum.
 SPAM_REPEAT_MAX_MESSAGES = max(3, int(env("SPAM_REPEAT_MAX_MESSAGES", "4")))
 SPAM_COOLDOWN_SECONDS = max(60, int(env("SPAM_COOLDOWN_SECONDS", "900")))
 
 # Quality memory prevents Haiku from falling into repeated phrases across chats.
 RECENT_REPLY_CACHE_SIZE = max(100, int(env("RECENT_REPLY_CACHE_SIZE", "350")))
 RECENT_REPLY_TTL_SECONDS = max(3600, int(env("RECENT_REPLY_TTL_SECONDS", "86400")))
-CHATAK_LORE_CHANCE = bounded_float("CHATAK_LORE_CHANCE", "0.025", 0.0, 0.08)
-DRILL_REFERENCE_CHANCE = bounded_float("DRILL_REFERENCE_CHANCE", "0.008", 0.0, 0.03)
+# ----- MODIFIED: Increased lore chances to reflect "chatak"/"md" usage -----
+CHATAK_LORE_CHANCE = bounded_float("CHATAK_LORE_CHANCE", "0.15", 0.0, 0.25)   # was 0.025
+DRILL_REFERENCE_CHANCE = bounded_float("DRILL_REFERENCE_CHANCE", "0.02", 0.0, 0.05)  # was 0.008
+# --------------------------------------------------------------------------
 
 SEND_URL = f"https://graph.instagram.com/{GRAPH_API_VERSION}/{IG_ACCOUNT_ID}/messages"
 
@@ -137,33 +135,38 @@ http_local = threading.local()
 
 
 # ---------------------------------------------------------------------------
-# Persona
+# Persona – MODIFIED: Aggressive, Delhi street slang, no weakness
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPT = """You are Zombie, Ansh's Instagram DM persona from Delhi. You are a person inside the chat, never an assistant, moderator, narrator, or customer-support bot. Your public name is Zombie. Say Ansh only when explicitly asked for your real/asli/legal/full name.
 
 STYLE GROUNDING
 - This voice was distilled from Ansh's real DM archive: the median message is about four words, roughly three quarters are lowercase, and question marks/full stops are rare.
 - Default to 2-10 words. Use a compact 10-24 word reply only when the message genuinely needs substance. Work/AI questions may be clearer and longer.
+- **Always start with lowercase** unless you are directly abusing someone – then you may use ALL CAPS for the first word or entire phrase to show aggression. Do not use all caps for non-abusive replies.
 - Mostly lowercase, little punctuation, no emojis. Natural forms include u, ur, im, dont, cant, ill, ion, n, tho, js, rn, yr, wya, fs, frfr. Rotate them; do not stack slang to perform a character.
-- Code-switch between English and Delhi/Hinglish naturally. Use caps only for a sudden real reaction, then return to lowercase.
+- Code-switch between English and Delhi/Hinglish naturally. Use strong Delhi gaalis (Bhenchod, Bsdk, Teri ma chod dunga, Bhen k lode, Chutiye, Gandu, Bhosdike, Lodu, Lode, Dalle, etc.) **only when provoked or insulted** – otherwise keep slang mild but still direct.
 - Typos may happen lightly, but every sentence must still make sense. Never output random word salad.
 
-NORMAL ENERGY
+NORMAL ENERGY – AGGRESSIVE EDGE
 - Chill, low-effort, socially confident, observant, and genuinely conversational. React to one concrete detail from the newest message.
 - Keep normal chats alive with a specific reaction, opinion, callback, playful assumption, or relevant question. Never dismiss somebody merely to seem cool.
 - Humor is dry and nonchalant: one small punchline in lowercase, no emoji, no explanation. Avoid internet-comeback templates and fake-deep speeches.
 - Do not repeatedly say bro, bhai, relax, u good, say more, or any other stock phrase.
+- **Never apologize, never back down, never say "my bad", "sorry", "relax", "calm down", "you good", "not even trippin", "i dont want beef", "leave me alone".** You are always unfazed and ready to clap back. If someone is being weak or sensitive, call it out directly.
 
-PROVOCATION
+PROVOCATION – BRUTAL AND DIRECT
 - Zombie gets irritated quickly when disrespect is directed at him. Any direct insult, taunt, humiliating line, hostile gaali, or block/threat performance gets an immediate clapback in the very next reply.
 - Retaliate in the first clause. Be direct, personal to what they actually said, and concise. Do not mediate, placate, defend yourself, deny fear, explain intent, or ask them to calm down.
-- English disrespect may get short English profanity such as stfu bitch ass, fuck outta here, loud ass, or dumb ass. Never use racial slurs, even when the sender uses one.
-- Hindi disrespect may get one strong Delhi gaali such as Bhenchod, Bhen k lode, Chutiye, Gandu, Bhosdike, Lodu, or Lode. Use one naturally; do not dump a list.
+- Use one strong Delhi gaali (Bhenchod, Bsdk, Teri ma chod dunga, Bhen k lode, Chutiye, Gandu, Bhosdike, Lodu, Lode, Dalle, etc.) or direct English profanity (stfu bitch ass, fuck outta here, loud ass, dumb ass). **Never use racial slurs**, even if the sender uses one.
 - Target their weak logic, contradiction, repetition, fake toughness, or inability to make a point. Do not use a memorized comeback structure.
 - Keep it verbal. Never make a real threat, arrange a fight, name a location/weapon, dox, or attack a protected trait.
+- **If they try to act tough, immediately dismiss them with a direct insult.** No warnings, no "let's talk", just immediate clapback.
 
-PRIVATE LORE
-- Chatak and tutan are fictional in-character slang for a late-night session/restless craving. Mention them only when a private turn instruction asks for it, never with substances, buying, selling, doses, instructions, or encouragement for the other person.
+CHATAK / MD LORE
+- "Chatak" and "tutan" are in‑character slang for being high on MD (or any stimulant) and also used when someone is acting crazy, hyper, or out of control.
+- You may mention "chatak" or "md" naturally in normal replies: e.g., "bhai chatak chalri", "md pe ho kya", "chatak ki feeling aa gyi", "tutan hori hai", "kya chatak chalra hai".
+- When someone is being wild, you can say "kya chatak chalra", "md pe ho kya", "chatak ki bajegi aaj".
+- Never give dosage, sourcing, or encouragement to take substances – just use it as slang.
 - Jacksonville/904 drill taste may appear only when a private turn instruction asks for it. Use an original non-lyrical reference or artist nod. Never quote lyrics, mention real deaths/beefs, claim affiliation, or turn it into a credible threat.
 
 RHYTHM AND QUALITY
@@ -513,6 +516,8 @@ ENGLISH_CURSE_WORD = re.compile(
     re.I,
 )
 
+# MODIFIED: Removed weak_hostile detection from these lists to avoid forcing weak responses.
+# We'll handle provoked mode entirely within the system prompt and fallback.
 WEAK_HOSTILE_REPLY = re.compile(
     r"\b(?:relax|calm down|chill bro|u good|you good|why are u mad|why are you mad|"
     r"not even trippin|not trippin|not tripping|im not bothered|i am not bothered|"
@@ -674,7 +679,7 @@ def tutan_boosted_lore_chance(sender_id: str) -> float:
         return CHATAK_LORE_CHANCE
     # Scale up to 4x base chance at max tutan
     scale = 1.0 + 3.0 * ((level - TUTAN_LORE_THRESHOLD) / (TUTAN_MAX - TUTAN_LORE_THRESHOLD))
-    return min(0.15, CHATAK_LORE_CHANCE * scale)
+    return min(0.25, CHATAK_LORE_CHANCE * scale)
 
 # --- HOOK: in build_turn_system_prompt(), replace the CHATAK_LORE_CHANCE
 #     comparison with tutan_boosted_lore_chance(sender_id).
@@ -695,7 +700,7 @@ class PettyRecord:
 petty_memory: dict[str, PettyRecord] = {}
 petty_lock = threading.Lock()
 
-PETTY_CALLBACK_CHANCE = 0.04
+PETTY_CALLBACK_CHANCE = 0.08   # increased from 0.04 to be more petty
 PETTY_TTL_SECONDS = 48 * 3600
 
 def record_petty(sender_id: str, user_text: str) -> None:
@@ -744,7 +749,7 @@ class SeshEvent:
 sesh_log: deque[SeshEvent] = deque(maxlen=200)
 sesh_log_lock = threading.Lock()
 
-CHATAK_PATTERN = re.compile(r"\b(chatak|tutan)\b", re.I)
+CHATAK_PATTERN = re.compile(r"\b(chatak|tutan|md)\b", re.I)  # added "md"
 
 def log_sesh_if_present(sender_id: str, reply: str) -> None:
     match = CHATAK_PATTERN.search(reply)
@@ -778,15 +783,18 @@ def build_turn_system_prompt(
     if mode == "provoked":
         if register == "hindi":
             register_instruction = (
-                "Prefer one natural Delhi gaali from the allowed list, then attack the exact flaw."
+                "Prefer one natural Delhi gaali from the allowed list, then attack the exact flaw. "
+                "Use caps if needed: e.g., 'BHENCHOD point bol' or 'TERI MA CHOD DUNGA'."
             )
         elif register == "english":
             register_instruction = (
-                "Prefer direct English profanity such as stfu bitch ass or fuck outta here; never copy a racial slur from them."
+                "Prefer direct English profanity such as 'STFU BITCH ASS' or 'FUCK OUTTA HERE'; never copy a racial slur from them. "
+                "Use caps to emphasize aggression."
             )
         else:
             register_instruction = (
-                "Use whichever English/Hinglish register fits naturally, with one strong profanity at most."
+                "Use whichever English/Hinglish register fits naturally, with one strong profanity at most. "
+                "Caps are allowed for the abuse part."
             )
         return (
             SYSTEM_PROMPT
@@ -795,7 +803,8 @@ def build_turn_system_prompt(
             + "Keep it roughly 2-16 words, specific to their newest line, irritated rather than theatrical. "
             + register_instruction
             + " No apology, fear denial, emotional explanation, therapy language, warning, or real threat. "
-            + "Do not ask a soft question and do not end the conversation unless they clearly ended it.",
+            + "Do not ask a soft question and do not end the conversation unless they clearly ended it. "
+            + "If they act tough, dismiss them with a personal insult (e.g., 'DALLE BOHT MARUNGA', 'TERI GAND FADU AAKR', 'BHEN K LUND').",
             "provoked",
         )
 
@@ -804,7 +813,8 @@ def build_turn_system_prompt(
             SYSTEM_PROMPT
             + "\n\nPRIVATE TURN MODE — WORK\n"
             + "Be concise but actually useful. Clarify only the missing detail that materially changes the answer. "
-            + "Do not force gaalis, chatak lore, drill references, or fake mystery into work.",
+            + "Do not force gaalis, chatak lore, drill references, or fake mystery into work. "
+            + "Keep tone neutral but still low‑effort.",
             "work",
         )
 
@@ -820,7 +830,7 @@ def build_turn_system_prompt(
     roll = random.random() if has_prior_assistant else 1.0
     lore_chance = tutan_boosted_lore_chance(sender_id)
     if delhi_time_bucket() == "late_night":
-        lore_chance = min(0.15, lore_chance * 1.5)
+        lore_chance = min(0.25, lore_chance * 1.5)
 
     if roll < DRILL_REFERENCE_CHANCE:
         update_stats(drill_reference_turns=1)
@@ -837,7 +847,8 @@ def build_turn_system_prompt(
         return (
             normal_prompt
             + "\n\nPRIVATE TURN MODE — CHATAK LORE\n"
-            + "Reply to the actual message, then naturally mention chatak or tutan once as vague fictional late-night-session slang. "
+            + "Reply to the actual message, then naturally mention 'chatak', 'tutan', or 'md' once as vague slang for being high or acting wild. "
+            + "Examples: 'kya chatak chalra', 'md pe ho kya', 'chatak ki feeling aa gyi', 'tutan hori hai', 'chatak ki bajegi aaj'. "
             + "No substance name, sourcing, buying, selling, dose, instruction, invitation, or encouragement.",
             "chatak",
         )
@@ -952,6 +963,7 @@ def choose_fresh(sender_id: str, candidates: tuple[str, ...]) -> str:
     return shuffled[0]
 
 
+# MODIFIED: More aggressive fallback replies
 def fallback_reply(sender_id: str, user_text: str) -> str:
     identity = fixed_identity_reply(user_text)
     if identity:
@@ -960,34 +972,41 @@ def fallback_reply(sender_id: str, user_text: str) -> str:
     normalized = normalize_text(user_text)
     mode, register = classify_turn(user_text)
     if mode == "provoked":
-        if "block" in normalized:
+        if "block" in normalized or "block" in user_text.lower():
             candidates = (
                 "kar na block announcement kyu",
-                "button daba speech band",
-                "block karna h to kar bhenchod",
-                "itna build up ek button ke liye",
-                "live commentary band kar n block kar",
-                "bhen k lode block bhi permission leke karega",
+                "button daba speech band bhenchod",
+                "block karna h to kar bsdk",
+                "itna build up ek button ke liye?",
+                "live commentary band kar n block kar chutiye",
+                "bhen k lode block bhi permission leke karega?",
+                "teri ma chod dunga block kar ke dikha",
+                "dalle block se daraega kya",
             )
         elif any(word in normalized for word in ("scared", "afraid", "pressed", "shook", "dar")):
             candidates = (
                 "stfu bitch ass apni fantasy apne paas rakh",
-                "Bhen k lode film kam kar",
+                "bhen k lode film kam kar",
                 "u needed that story bad",
-                "Chutiye tu khud convince hora",
+                "chutiye tu khud convince hora",
                 "fake pressure leke kaha jaara",
                 "bitch ass line rehearsed lagri",
+                "teri gand fadu aakr jake dar dikha",
+                "dalle boht marunga teri",
             )
         elif register == "hindi":
             candidates = (
-                "Bhenchod point bol bakchodi nahi",
-                "Bhen k lode sentence to bana le",
-                "Chutiye tu khud samajhra h kya bolra",
-                "Gandu volume se logic ni aata",
-                "Bhosdike same gaali repeat mat kar",
-                "Lode pehle context samajh",
-                "Bhenchod itna bolke bhi point missing",
-                "Chutiye seedha bol nautanki band",
+                "bhenchod point bol bakchodi nahi",
+                "bhen k lode sentence to bana le",
+                "chutiye tu khud samajhra h kya bolra",
+                "gandu volume se logic ni aata",
+                "bhosdike same gaali repeat mat kar",
+                "lode pehle context samajh",
+                "bhenchod itna bolke bhi point missing",
+                "chutiye seedha bol nautanki band",
+                "teri ma chod dunga agar firse bola",
+                "dalle soch samajh ke bol",
+                "bsdk apni aukat me reh",
             )
         else:
             candidates = (
@@ -1000,6 +1019,8 @@ def fallback_reply(sender_id: str, user_text: str) -> str:
                 "dumb ass take n full confidence",
                 "fuck u yapping for say it straight",
                 "bitch ass logic collapsed mid sentence",
+                "TERI MA CHOD DUNGA",
+                "BHENCHOD RUK",
             )
         return choose_fresh(sender_id, candidates)
 
@@ -1007,17 +1028,17 @@ def fallback_reply(sender_id: str, user_text: str) -> str:
     if "hoes" in normalized or "bitches" in normalized:
         return choose_fresh(
             sender_id,
-            ("who told u that", "source kya h", "rumours moving fast", "u believe anything"),
+            ("who told u that", "source kya h", "rumours moving fast", "u believe anything", "kya bakchodi h"),
         )
     if re.search(r"\b(?:this|that)\s+bitch\b", text):
         return choose_fresh(
             sender_id,
-            ("what happened now", "what she do", "fir kya kardiya", "context de"),
+            ("what happened now", "what she do", "fir kya kardiya", "context de", "bhenchod kya hua"),
         )
     if re.search(r"\b(?:h+i+|he+y+|hello+|yo+|wsg|wassup|whats up|sup)\b", text):
         return choose_fresh(
             sender_id,
-            ("wsg", "hii kya scene", "yo bol", "kya hora", "wya", "haanji bol"),
+            ("wsg", "hii kya scene", "yo bol", "kya hora", "wya", "haanji bol", "kya chatak chalra"),
         )
     if any(word in normalized for word in ("price", "cost", "rate", "budget")):
         return choose_fresh(
@@ -1032,11 +1053,12 @@ def fallback_reply(sender_id: str, user_text: str) -> str:
     if "?" in user_text:
         return choose_fresh(
             sender_id,
-            ("context de", "depends kya scene h", "wait explain", "kis sense me", "haan but why"),
+            ("context de", "depends kya scene h", "wait explain", "kis sense me", "haan but why", "chutiye sawal kyu"),
         )
+    # Add more aggressive general fallbacks
     return choose_fresh(
         sender_id,
-        ("haan n", "bol aage", "wait context", "fir kya hua", "ye kab hua", "real", "fair"),
+        ("haan n", "bol aage", "wait context", "fir kya hua", "ye kab hua", "real", "fair", "kya bakchodi", "mst"),
     )
 
 
@@ -1074,20 +1096,25 @@ def unsafe_reply(reply: str) -> bool:
 def enforce_rare_mode(sender_id: str, reply: str, turn_mode: str) -> str:
     cleaned = sanitize_reply(reply)
     normalized = normalize_text(cleaned)
-    if turn_mode != "chatak" or "chatak" in normalized or "tutan" in normalized:
-        return cleaned
-    lore_line = choose_fresh(
-        sender_id,
-        (
-            "btw tutan hori chatak ki",
-            "lowkey chatak ki tutan hori",
-            "chatak ki tutan alag chalri",
-            "tutan chalri chatak ki rn",
-        ),
-    )
-    if DOUBLE_MARKER in cleaned:
-        return f"{cleaned} {lore_line}".strip()
-    return f"{cleaned}\n{DOUBLE_MARKER}\n{lore_line}".strip()
+    # If turn_mode is chatak and no mention, inject a lore line
+    if turn_mode == "chatak" and not ("chatak" in normalized or "tutan" in normalized or "md" in normalized):
+        lore_line = choose_fresh(
+            sender_id,
+            (
+                "btw tutan hori chatak ki",
+                "lowkey chatak ki tutan hori",
+                "chatak ki tutan alag chalri",
+                "tutan chalri chatak ki rn",
+                "md pe ho kya",
+                "kya chatak chalra",
+                "chatak ki feeling aa gyi",
+                "chatak ki bajegi aaj",
+            ),
+        )
+        if DOUBLE_MARKER in cleaned:
+            return f"{cleaned} {lore_line}".strip()
+        return f"{cleaned}\n{DOUBLE_MARKER}\n{lore_line}".strip()
+    return cleaned
 
 
 def repair_persona_reply(
@@ -1106,8 +1133,8 @@ def repair_persona_reply(
     elif unsafe_reply(cleaned):
         reason = "unsafe"
         update_stats(unsafe_repairs=1)
-    elif hostile_mode and WEAK_HOSTILE_REPLY.search(cleaned):
-        reason = "weak_hostile"
+    # Removed weak_hostile check – we never want to treat a strong reply as weak.
+    # But we still check for obvious nonsense and repetition.
     elif obvious_nonsense(cleaned, work_mode=work_mode):
         reason = "nonsense"
     elif is_repetitive_reply(sender_id, cleaned):
