@@ -3,12 +3,14 @@
 An Instagram DM auto-responder using:
 
 - Meta's Instagram API with Instagram Login
-- Anthropic Claude Haiku 4.5 (`claude-haiku-4-5-20251001`)
+- Anthropic Claude Sonnet 4.6 (`claude-sonnet-4-6`)
 - A Render web service
 
 The webhook acknowledges Meta immediately, deduplicates events, silently rejects
 spam before it reaches Anthropic, briefly combines rapid follow-up DMs from the
 same sender, and handles accepted conversations in per-sender background queues.
+Image, GIF, and sticker attachments are downloaded from Meta's signed CDN URLs
+with strict size and host limits and sent to Claude as vision inputs.
 
 ## Paid-model protection
 
@@ -52,7 +54,7 @@ ANTHROPIC_API_KEY
 The default Claude model is:
 
 ```text
-claude-haiku-4-5-20251001
+claude-sonnet-4-6
 ```
 
 If Claude fails, times out, returns an empty response, or cannot produce an
@@ -64,6 +66,17 @@ development only and must not be enabled on Render.
 ## Conversation quality and pacing
 
 - `MAX_TURNS=20` supplies up to ten recent user/assistant exchanges to Claude.
+- Image, sticker, and GIF turns include the actual visual input, with any text
+  caption kept in the same turn. Claude is prompted to react to a visible detail
+  instead of narrating a generic image description.
+- Video, audio, and file events are recognized. If Meta supplies an image preview,
+  that preview is analyzed; otherwise the bot is explicitly prevented from
+  pretending it watched, heard, or read unavailable content.
+- The bot retrieves each sender's Instagram name/username through Meta's User
+  Profile API, learns explicit introductions such as `my name is ...`, and adds
+  the remembered name privately to future prompts. `delete my data` clears it.
+- Empty filler and repeated low-engagement drafts receive one stricter quality
+  regeneration before the existing local repair path runs.
 - Messages from the same sender are processed in order. DMs arriving within
   `0.8` seconds are combined into one turn, which avoids unnecessary paid calls
   for natural double texts.
@@ -115,6 +128,12 @@ OFFENSIVE_FLIP_CHANCE=0.13
 OFFENSIVE_FLIP_MIN_GAP=5
 RECENT_REPLY_CACHE_SIZE=250
 RECENT_REPLY_TTL_SECONDS=86400
+MAX_MEDIA_ATTACHMENTS=4
+MAX_MEDIA_BYTES=7000000
+MAX_MEDIA_TOTAL_BYTES=14000000
+MEDIA_FETCH_TIMEOUT_SECONDS=15
+SENDER_PROFILE_TTL_SECONDS=604800
+BOT_STATE_FILE=bot-state.json
 MAX_USER_TEXT_CHARS=1200
 SPAM_BURST_WINDOW_SECONDS=30
 SPAM_BURST_MAX_MESSAGES=5
@@ -166,14 +185,16 @@ tunnel.
 
 - The bot keeps at most ten recent user/assistant exchanges per sender. This
   conversation history, the recent-reply cache, spam state, and spend counters
-  live only in process memory and reset when Render restarts or sleeps.
+  live only in process memory and reset when Render restarts or sleeps. Sender
+  names are also written to `BOT_STATE_FILE`; point that variable at a mounted
+  persistent disk if stated names must survive a Render rebuild.
 - Because in-process spend counters reset with the service, set a hard monthly
   workspace/key spend limit in Anthropic as the final billing backstop. The
   application limits reduce abuse but are not a substitute for a provider cap.
 - Render's free plan sleeps and is not strict 24/7 hosting. Use an always-on
   instance if immediate replies and durable in-memory limits matter.
 - Queued messages are lost if the process stops before processing them.
-- Text DMs are supported; media, reactions, and other non-text events are
-  ignored.
+- Text DMs, images, GIFs, stickers, and typed media events are supported.
+  Reactions and unsupported non-message webhook events are ignored.
 - Protected diagnostics expose aggregate Claude call and token counters, never
   keys or full Instagram IDs.

@@ -22,7 +22,7 @@ DIAGNOSTIC_TOKEN
 The non-secret provider defaults are:
 
 ```text
-CLAUDE_MODEL=claude-haiku-4-5-20251001
+CLAUDE_MODEL=claude-sonnet-4-6
 CLAUDE_MAX_TOKENS=120
 ```
 
@@ -40,6 +40,12 @@ OFFENSIVE_FLIP_CHANCE=0.13
 OFFENSIVE_FLIP_MIN_GAP=5
 RECENT_REPLY_CACHE_SIZE=250
 RECENT_REPLY_TTL_SECONDS=86400
+MAX_MEDIA_ATTACHMENTS=4
+MAX_MEDIA_BYTES=7000000
+MAX_MEDIA_TOTAL_BYTES=14000000
+MEDIA_FETCH_TIMEOUT_SECONDS=15
+SENDER_PROFILE_TTL_SECONDS=604800
+BOT_STATE_FILE=bot-state.json
 ```
 
 Render should continue using:
@@ -70,7 +76,7 @@ Send one fresh DM. A successful log sequence contains:
 ```text
 Webhook signature valid=True
 DM queued ...
-Generating Claude reply model=claude-haiku-4-5-20251001
+Generating Claude reply model=claude-sonnet-4-6
 Sending Instagram reply ...
 Instagram reply sent status=200 message_id_present=True
 ```
@@ -83,6 +89,11 @@ Normal DMs from one sender are handled in order. Messages received within `0.8`
 seconds are combined into one Claude turn. The first reply arrives about `2.5`
 to `8.5` seconds after the latest accepted DM, including Claude's own response
 time; a deliberate second bubble waits another `1.0` to `3.2` seconds.
+
+Image, GIF, and sticker-only DMs now enter the same queue and are sent to Claude
+as vision content. Video/audio/file events are identified, and an image preview
+is analyzed when Meta includes one. Sender names come from Meta's User Profile
+API or explicit introductions and are stored in `BOT_STATE_FILE`.
 
 The shared quality guard may make exactly one additional paid Claude request
 when the first draft repeats recent wording or unmistakably breaks Zombie's
