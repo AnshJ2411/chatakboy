@@ -706,7 +706,8 @@ def build_reply(profile: SenderProfile, user_text: str, has_media: bool) -> str 
         return None
     if unsafe_reply(draft):
         return None
-            profile.conversation.append({"role": "assistant", "content": draft})
+    try:
+        profile.conversation.append({"role": "assistant", "content": draft})
     except Exception:
         pass
     return draft
