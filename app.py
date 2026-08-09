@@ -13,7 +13,6 @@ import random
 import re
 import threading
 import time
-import field
 import unicodedata
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
