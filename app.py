@@ -1853,18 +1853,18 @@ def generate_reply(
         remember_recent_reply(sender_id, identity)
         return identity
 
+    # FORCE AGGRESSIVE POOL FOR BOTH THREAT AND PROVOKED
+    if initial_mode in ("threat", "provoked"):
+        chosen = random.choice(THREAT_BOUNDARY_REPLIES_HI)
+        remember_recent_reply(sender_id, chosen)
+        return chosen
+
     with conversation_lock:
         history = list(conversations.get(sender_id, []))[-MAX_TURNS:]
     prepared_images, unavailable = prepare_media_for_claude(attachments)
     current_content = build_current_user_content(user_text, attachments, prepared_images, unavailable)
     messages: list[dict[str, Any]] = list(history) + [{"role": "user", "content": current_content}]
     system_prompt, turn_mode = build_turn_system_prompt(sender_id, turn_text, history)
-
-    if turn_mode == "threat":
-        lang: Literal["hi", "en", "mix"] = (
-            initial_register if initial_register in ("hi", "en", "mix") else detect_lang(turn_text)
-        )
-        return generate_threat_boundary_reply(sender_id, messages, system_prompt, lang)
 
     draft = ""
     prompt_for_attempt = system_prompt
