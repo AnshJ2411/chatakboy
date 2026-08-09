@@ -12,7 +12,6 @@ import os
 import random
 import re
 import threading
-import instagrapi
 import time
 import field
 import unicodedata
