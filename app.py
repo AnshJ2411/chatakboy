@@ -13,6 +13,7 @@ import random
 import re
 import threading
 import time
+import field
 import unicodedata
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -470,6 +471,9 @@ class SenderMemory:
     profile_checked_at: float = 0.0
     abuse_count: int = 0
     last_abuse_at: float = 0.0
+    interests: list[str] = field(default_factory=list)
+    last_topic: str = ""
+    engagement_score: int = 0  # 0-100
 
 
 @dataclass(frozen=True)
@@ -605,9 +609,11 @@ def _sender_memory_payload_locked() -> dict[str, Any]:
                 "profile_checked_at": memory.profile_checked_at,
                 "abuse_count": memory.abuse_count,
                 "last_abuse_at": memory.last_abuse_at,
+                "interests": memory.interests,
+                "engagement_score": memory.engagement_score,
             }
             for sender_id, memory in sender_memories.items()
-            if memory.name or memory.username or memory.profile_checked_at or memory.abuse_count
+            if memory.name or memory.username or memory.profile_checked_at or memory.abuse_count or memory.interests or memory.engagement_score
         },
     }
 
@@ -2228,7 +2234,30 @@ def story_fallback_reply(sender_id: str, text: str) -> str:
     if "?" in text or re.search(r"\b(?:what|why|how|kya|kaise|kyu)\b", text, re.I):
         return fallback_reply(sender_id, text)
     return choose_fresh(sender_id, STORY_REPLY_POOL)
+def extract_interest(text: str) -> str | None:
+    topics = {
+        "movie": ["movie", "film", "series", "netflix", "show"],
+        "music": ["music", "song", "artist", "rap", "hip hop"],
+        "food": ["food", "pizza", "momos", "biryani", "burger"],
+        "sports": ["cricket", "football", "ipl", "game"],
+        "work": ["collab", "project", "business", "work"],
+        "gaming": ["game", "valorant", "pubg", "gta"],
+    }
+    lower = text.lower()
+    for topic, keywords in topics.items():
+        if any(k in lower for k in keywords):
+            return topic
+    return None
 
+def ask_about_user(sender_id: str) -> str | None:
+    if random.random() > 0.08:
+        return None
+    memory = sender_memory_snapshot(sender_id)
+    if memory.name:
+        return random.choice([f"{memory.name} kya h", f"{memory.name} ka scene kya h"])
+    if memory.interests:
+        return random.choice([f"still into {memory.interests[-1]}?", f"kaisa h {memory.interests[-1]}"])
+    return random.choice(["tu kya karta h", "kya chalra", "whats your scene", "kya h"])"])
 
 def generate_reply(
     sender_id: str,
@@ -2240,15 +2269,12 @@ def generate_reply(
     turn_text = user_text.strip() or media_summary(attachments)
     
     # ======= CHATAK AGGRESSION OVERRIDE – RAW =======
-    # If ANY severe abuse marker is present, IMMEDIATELY retaliate.
-    # No classification. No Claude. No de-escalation.
     raw_lower = turn_text.lower()
     abuse_triggered = False
     for marker in SEVERE_ABUSE_MARKERS:
         if marker in raw_lower:
             abuse_triggered = True
             break
-    # Also catch common Delhi abusive words not in SEVERE_ABUSE_MARKERS
     if not abuse_triggered:
         delhi_abuse_words = ("randike", "bhenchod", "behenchod", "madarchod", "chutiye", 
                             "bsdk", "bhosdike", "gaandu", "gandu", "lodu", "lund", 
@@ -2274,6 +2300,25 @@ def generate_reply(
         remember_recent_reply(sender_id, known_name)
         return known_name
 
+    # ===== INTEREST & ENGAGEMENT =====
+    memory = sender_memory_snapshot(sender_id)
+    interest = extract_interest(turn_text)
+    if interest or memory.engagement_score < 100:
+        with sender_memory_lock:
+            real_memory = sender_memories.setdefault(sender_id, SenderMemory())
+            if interest and interest not in real_memory.interests:
+                real_memory.interests.append(interest)
+            if real_memory.engagement_score < 100:
+                real_memory.engagement_score = min(100, real_memory.engagement_score + 1)
+            persist_sender_memories_locked()
+    
+    # Ask about them occasionally (only for non-aggressive modes)
+    if initial_mode not in ("threat", "provoked", "deletion"):
+        ask_reply = ask_about_user(sender_id)
+        if ask_reply:
+            remember_recent_reply(sender_id, ask_reply)
+            return ask_reply
+
     identity = fixed_identity_reply(user_text)
     if identity:
         remember_recent_reply(sender_id, identity)
@@ -2286,7 +2331,7 @@ def generate_reply(
         remember_recent_reply(sender_id, sticker_reply)
         return sticker_reply
 
-    # SECONDARY AGGRESSION CHECK – if mode is threat or provoked, bypass Claude
+    # SECONDARY AGGRESSION CHECK
     if initial_mode in ("threat", "provoked"):
         chosen = random.choice(THREAT_BOUNDARY_REPLIES_HI)
         remember_recent_reply(sender_id, chosen)
