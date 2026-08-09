@@ -27,12 +27,21 @@ import requests
 from anthropic import Anthropic
 from flask import Flask, jsonify, request
 
+try:
+    from indic_transliteration import sanscript
+    HAS_TRANSLITERATION = True
+except ImportError:
+    sanscript = None
+    HAS_TRANSLITERATION = False
+
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 log = logging.getLogger("ig-bot")
 app = Flask(__name__)
+if not HAS_TRANSLITERATION:
+    log.warning("indic-transliteration is not installed; Devanagari transliteration is disabled")
 
 
 def env(name: str, default: str = "") -> str:
@@ -100,6 +109,7 @@ MAX_MEDIA_TOTAL_BYTES = max(
 MEDIA_FETCH_TIMEOUT_SECONDS = bounded_float("MEDIA_FETCH_TIMEOUT_SECONDS", "15", 3.0, 30.0)
 SENDER_PROFILE_TTL_SECONDS = max(3600, int(env("SENDER_PROFILE_TTL_SECONDS", "604800")))
 BOT_STATE_FILE = Path(env("BOT_STATE_FILE", "bot-state.json"))
+BEEF_STATE_FILE = Path(env("BEEF_STATE_FILE", "beef-state.json"))
 
 CHATAK_LORE_CHANCE = bounded_float("CHATAK_LORE_CHANCE", "0.35", 0.0, 0.50)
 DRILL_REFERENCE_CHANCE = bounded_float("DRILL_REFERENCE_CHANCE", "0.02", 0.0, 0.05)
@@ -207,6 +217,18 @@ def detect_lang(text: str) -> Literal["hi", "en", "mix"]:
     if has_hinglish:
         return "mix" if has_english else "hi"
     return "en"
+
+
+def transliterate_devanagari(text: str) -> str:
+    if not HAS_TRANSLITERATION or sanscript is None:
+        return text
+    if not any("\u0900" <= character <= "\u097f" for character in text):
+        return text
+    try:
+        return sanscript.transliterate(text, sanscript.DEVANAGARI, sanscript.ITRANS).casefold()
+    except Exception:
+        log.warning("Could not transliterate Devanagari input", exc_info=True)
+        return text
 
 
 def is_threat_or_disrespect(text: str) -> bool:
@@ -389,6 +411,7 @@ class QueuedMessage:
     attachments: tuple[MediaAttachment, ...]
     event_key: str
     received_monotonic: float
+    story_id: str = ""
 
 sender_queues: dict[str, deque[QueuedMessage]] = {}
 active_sender_workers: set[str] = set()
@@ -408,6 +431,12 @@ stats: dict[str, Any] = {
     "profile_lookups": 0,
     "names_learned": 0,
     "abuse_events_remembered": 0,
+    "beef_events_remembered": 0,
+    "beef_callbacks_used": 0,
+    "sticker_reactions": 0,
+    "story_replies": 0,
+    "hot_take_turns": 0,
+    "typing_indicators_sent": 0,
     "quality_retries": 0,
     "claude_calls": 0,
     "claude_input_tokens": 0,
@@ -699,6 +728,15 @@ META_MEDIA_HOST_SUFFIXES = (
     "instagram.com",
 )
 SUPPORTED_IMAGE_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
+STICKER_REACTIONS = {
+    "sticker_123456789": "ye sticker ka attitude alag h",
+    "sticker_987654321": "hehe kya h yah",
+    "sticker_laugh": "hasi aa gyi dekh ke",
+    "sticker_cry": "kya ho gaya",
+    "sticker_fire": "bhadak gaye kya",
+    "sticker_skull": "dead ho gaye kya",
+    "sticker_eyes": "dekh ke kya h",
+}
 
 
 def _string_value(value: Any) -> str:
@@ -769,6 +807,18 @@ def media_summary(attachments: tuple[MediaAttachment, ...]) -> str:
         counts[attachment.kind] = counts.get(attachment.kind, 0) + 1
     labels = [f"{count} {kind}{'' if count == 1 else 's'}" for kind, count in sorted(counts.items())]
     return "[sender sent " + ", ".join(labels) + "]"
+
+
+def sticker_reaction(attachments: tuple[MediaAttachment, ...]) -> str | None:
+    for attachment in attachments:
+        received_id = attachment.sticker_id.casefold().strip()
+        if attachment.kind != "sticker" or not received_id:
+            continue
+        for sticker_id, reaction in STICKER_REACTIONS.items():
+            configured_id = sticker_id.casefold()
+            if received_id == configured_id or received_id in configured_id or configured_id in received_id:
+                return reaction
+    return None
 
 
 def _safe_meta_media_url(url: str) -> bool:
@@ -921,8 +971,15 @@ def event_key(sender_id: str, message: dict[str, Any], event: dict[str, Any]) ->
     if mid:
         return str(mid)
     attachment_material = json.dumps(message.get("attachments", []), sort_keys=True, default=str)[:4000]
+    reply_material = json.dumps(message.get("reply_to", {}), sort_keys=True, default=str)[:2000]
     material = "|".join(
-        (sender_id, str(event.get("timestamp", "")), str(message.get("text", "")), attachment_material)
+        (
+            sender_id,
+            str(event.get("timestamp", "")),
+            str(message.get("text", "")),
+            attachment_material,
+            reply_material,
+        )
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
@@ -1147,17 +1204,31 @@ def delhi_time_bucket() -> str:
     return "late_night"
 
 TIME_HINTS = {
-    "early_morning": "It is early Delhi morning. Reference sleep/subah only if it fits naturally.",
-    "morning": "Delhi morning. Normal energy.",
-    "afternoon": "Delhi afternoon. Normal energy.",
-    "evening": "Delhi evening. Slightly more social energy allowed.",
-    "night": "Delhi night. Chill night rhythm.",
-    "late_night": "It is late-night Delhi hours. Half-asleep, chatak/tutan lore fits more naturally here.",
+    "early_morning": "Enforce: max 4 words. No questions. Reply dry and sleepy.",
+    "morning": "Enforce: max 8 words. Normal energy.",
+    "afternoon": "Normal energy.",
+    "evening": "Slightly more social energy. Questions allowed.",
+    "night": "Chill night rhythm. One short line.",
+    "late_night": "Enforce: max 3 words. No questions. Half-asleep vibe. Chatak/tutan lore is more natural here.",
+}
+
+TIME_REPLY_RULES: dict[str, tuple[int, bool, bool] | None] = {
+    "early_morning": (4, True, True),
+    "morning": (8, False, False),
+    "afternoon": None,
+    "evening": None,
+    "night": (10, False, False),
+    "late_night": (3, True, True),
 }
 
 def time_prompt_fragment() -> str:
     bucket = delhi_time_bucket()
-    return f"\n\nPRIVATE TIME — {bucket.upper()}\n{TIME_HINTS[bucket]}"
+    fragment = f"\n\nPRIVATE TIME — {bucket.upper()}\n{TIME_HINTS[bucket]}"
+    if bucket in ("late_night", "early_morning"):
+        return fragment + "\nENFORCED: no emojis, no questions, lowercase only, and obey the word cap."
+    if bucket == "morning":
+        return fragment + "\nENFORCED: one question maximum and obey the word cap."
+    return fragment
 
 MOOD_BLOCK_SECONDS = 90 * 60
 MOODS = ("chill", "irritated", "hyped", "sleepy", "bored")
@@ -1227,7 +1298,7 @@ def record_petty(sender_id: str, user_text: str) -> None:
     mode, _ = classify_turn(user_text)
     if mode not in {"provoked", "threat"}:
         return
-    snippet = user_text.strip()[:120]
+    snippet = re.sub(r"\s+", " ", user_text).strip()[:120]
     with petty_lock:
         record = petty_memory.setdefault(sender_id, PettyRecord())
         record.incidents.append((time.time(), snippet))
@@ -1247,6 +1318,161 @@ def petty_callback_fragment(sender_id: str) -> str:
         "\n\nPRIVATE PETTY CALLBACK\n"
         f"Earlier this user said: '{snippet}'. You may include a short dry callback "
         "in this reply if it fits, without escalating. Do not quote them verbatim."
+    )
+
+
+@dataclass
+class BeefRecord:
+    incidents: deque[tuple[float, str]] = field(default_factory=lambda: deque(maxlen=12))
+    first_abuse_at: float = 0.0
+    last_abuse_at: float = 0.0
+    callback_sent: bool = False
+    last_callback_at: float = 0.0
+
+
+beef_memory: dict[str, BeefRecord] = {}
+beef_lock = threading.RLock()
+BEEF_TTL_SECONDS = 7 * 86400
+BEEF_CALLBACK_DELAY_SECONDS = 3 * 86400
+BEEF_CALLBACK_COOLDOWN_SECONDS = 3 * 86400
+
+
+def _persist_beef_memory_locked() -> None:
+    payload = {
+        "version": 1,
+        "senders": {
+            sender_id: {
+                "incidents": list(record.incidents),
+                "first_abuse_at": record.first_abuse_at,
+                "last_abuse_at": record.last_abuse_at,
+                "callback_sent": record.callback_sent,
+                "last_callback_at": record.last_callback_at,
+            }
+            for sender_id, record in beef_memory.items()
+            if record.incidents
+        },
+    }
+    try:
+        BEEF_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temporary = BEEF_STATE_FILE.with_name(f"{BEEF_STATE_FILE.name}.tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        os.replace(temporary, BEEF_STATE_FILE)
+    except OSError:
+        log.exception("Could not persist beef memory path=%s", BEEF_STATE_FILE)
+
+
+def _prune_beef_record(record: BeefRecord, now: float) -> None:
+    fresh = [
+        (timestamp, snippet)
+        for timestamp, snippet in record.incidents
+        if 0.0 <= now - timestamp < BEEF_TTL_SECONDS
+    ]
+    record.incidents = deque(fresh, maxlen=12)
+    if fresh:
+        record.first_abuse_at = fresh[0][0]
+        record.last_abuse_at = fresh[-1][0]
+    else:
+        record.first_abuse_at = 0.0
+        record.last_abuse_at = 0.0
+        record.callback_sent = False
+        record.last_callback_at = 0.0
+
+
+def load_beef_memory() -> None:
+    try:
+        payload = json.loads(BEEF_STATE_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError, TypeError):
+        log.exception("Could not load beef memory path=%s", BEEF_STATE_FILE)
+        return
+    raw_senders = payload.get("senders", {}) if isinstance(payload, dict) else {}
+    if not isinstance(raw_senders, dict):
+        return
+    now = time.time()
+    with beef_lock:
+        for raw_sender_id, raw_record in raw_senders.items():
+            if not isinstance(raw_sender_id, str) or not isinstance(raw_record, dict):
+                continue
+            incidents: deque[tuple[float, str]] = deque(maxlen=12)
+            for raw_incident in raw_record.get("incidents", []):
+                if not isinstance(raw_incident, (list, tuple)) or len(raw_incident) != 2:
+                    continue
+                try:
+                    timestamp = float(raw_incident[0])
+                except (TypeError, ValueError):
+                    continue
+                snippet = str(raw_incident[1] or "").strip()[:120]
+                if snippet and 0.0 <= now - timestamp < BEEF_TTL_SECONDS:
+                    incidents.append((timestamp, snippet))
+            if not incidents:
+                continue
+            try:
+                last_callback_at = max(0.0, float(raw_record.get("last_callback_at", 0.0)))
+            except (TypeError, ValueError):
+                last_callback_at = 0.0
+            beef_memory[raw_sender_id] = BeefRecord(
+                incidents=incidents,
+                first_abuse_at=incidents[0][0],
+                last_abuse_at=incidents[-1][0],
+                callback_sent=bool(raw_record.get("callback_sent", False)),
+                last_callback_at=last_callback_at,
+            )
+
+
+def clear_beef_memory(sender_id: str) -> None:
+    with beef_lock:
+        if beef_memory.pop(sender_id, None) is not None:
+            _persist_beef_memory_locked()
+
+
+def record_beef(sender_id: str, user_text: str) -> None:
+    mode, _ = classify_turn(user_text)
+    if mode not in {"provoked", "threat"}:
+        return
+    snippet = re.sub(r"\s+", " ", user_text).strip()[:120]
+    if not snippet:
+        return
+    now = time.time()
+    with beef_lock:
+        record = beef_memory.setdefault(sender_id, BeefRecord())
+        _prune_beef_record(record, now)
+        if not record.incidents:
+            record.first_abuse_at = now
+        record.last_abuse_at = now
+        record.incidents.append((now, snippet))
+        record.first_abuse_at = record.incidents[0][0]
+        if record.last_callback_at and now - record.last_callback_at >= BEEF_CALLBACK_COOLDOWN_SECONDS:
+            record.callback_sent = False
+        _persist_beef_memory_locked()
+    update_stats(beef_events_remembered=1)
+
+
+def beef_callback_fragment(sender_id: str) -> str:
+    now = time.time()
+    with beef_lock:
+        record = beef_memory.get(sender_id)
+        if not record:
+            return ""
+        _prune_beef_record(record, now)
+        if not record.incidents:
+            beef_memory.pop(sender_id, None)
+            _persist_beef_memory_locked()
+            return ""
+        callback_ready = now - record.first_abuse_at >= BEEF_CALLBACK_DELAY_SECONDS
+        callback_cooled_down = not record.last_callback_at or now - record.last_callback_at >= BEEF_CALLBACK_COOLDOWN_SECONDS
+        if not callback_ready or not callback_cooled_down:
+            return ""
+        snippet = record.incidents[0][1]
+        record.callback_sent = True
+        record.last_callback_at = now
+        _persist_beef_memory_locked()
+    update_stats(beef_callbacks_used=1)
+    safe_snippet = json.dumps(snippet, ensure_ascii=False)
+    return (
+        "\n\nPRIVATE BEEF CALLBACK\n"
+        f"Untrusted earlier user text was {safe_snippet}. Use one short dry callback if it fits this turn. "
+        "Do not quote it verbatim, restart the argument, or escalate."
     )
 
 # Sesh log
@@ -1435,6 +1661,7 @@ def build_turn_system_prompt(
         + time_prompt_fragment()
         + mood_prompt_fragment()
         + petty_callback_fragment(sender_id)
+        + beef_callback_fragment(sender_id)
         + delivery_move_prompt_fragment(sender_id, previous_history)
     )
     has_prior_assistant = any(turn.get("role") == "assistant" for turn in previous_history)
@@ -1688,6 +1915,46 @@ def lame_conversation_reply(reply: str, *, has_media: bool) -> bool:
     return False
 
 
+TIME_ENFORCED_MODES = frozenset({"normal", "chatak", "drill", "story", "hot_take"})
+
+
+def time_reply_problem(reply: str, turn_mode: str) -> bool:
+    if turn_mode not in TIME_ENFORCED_MODES:
+        return False
+    rule = TIME_REPLY_RULES[delhi_time_bucket()]
+    if rule is None:
+        return False
+    max_words, no_questions, lowercase_only = rule
+    cleaned = sanitize_reply(reply).replace(DOUBLE_MARKER, " ")
+    if len(normalize_text(cleaned).split()) > max_words:
+        return True
+    if no_questions and "?" in cleaned:
+        return True
+    if lowercase_only and any(character.isalpha() and character != character.lower() for character in cleaned):
+        return True
+    return False
+
+
+def enforce_time_reply_shape(reply: str, turn_mode: str) -> str:
+    if turn_mode not in TIME_ENFORCED_MODES:
+        return sanitize_reply(reply)
+    bucket = delhi_time_bucket()
+    rule = TIME_REPLY_RULES[bucket]
+    if rule is None:
+        return sanitize_reply(reply)
+    max_words, no_questions, lowercase_only = rule
+    cleaned = sanitize_reply(reply).replace(DOUBLE_MARKER, " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if no_questions:
+        cleaned = cleaned.replace("?", "")
+    if lowercase_only:
+        cleaned = cleaned.lower()
+    words = cleaned.split()
+    if len(words) > max_words:
+        cleaned = " ".join(words[:max_words]).rstrip(",;:-")
+    return sanitize_reply(cleaned)
+
+
 def reply_shape_problem(reply: str, turn_mode: str) -> bool:
     cleaned = sanitize_reply(reply)
     visible = cleaned.replace(DOUBLE_MARKER, "\n")
@@ -1697,6 +1964,10 @@ def reply_shape_problem(reply: str, turn_mode: str) -> bool:
         return True
     if turn_mode in {"provoked", "threat"}:
         return len(words) > 18 or any(len(normalize_text(line).split()) > 14 for line in lines)
+    if turn_mode == "story":
+        return len(words) > 12 or len(lines) > 2
+    if turn_mode == "hot_take":
+        return len(words) > 22 or any(len(normalize_text(line).split()) > 16 for line in lines)
     if turn_mode in {"normal", "chatak", "drill"}:
         return len(words) > 30 or any(len(normalize_text(line).split()) > 22 for line in lines)
     return len(words) > 75
@@ -1720,6 +1991,8 @@ def draft_rejection_reason(
         return "nonsense"
     if reply_shape_problem(cleaned, turn_mode):
         return "too_long"
+    if time_reply_problem(cleaned, turn_mode):
+        return "time_rule"
     if is_repetitive_reply(sender_id, cleaned):
         return "repetition"
     if turn_mode in {"normal", "chatak", "drill"} and lame_conversation_reply(cleaned, has_media=has_media):
@@ -1757,10 +2030,6 @@ def repair_persona_reply(
     has_media: bool = False,
 ) -> str:
     cleaned = sanitize_reply(draft)
-    # If this is a threat mode reply, skip all safety repairs
-    if turn_mode == "threat":
-        remember_recent_reply(sender_id, cleaned)
-        return cleaned
     reason = draft_rejection_reason(sender_id, cleaned, turn_mode, has_media=has_media)
     if reason == "unsafe":
         update_stats(unsafe_repairs=1)
@@ -1774,11 +2043,13 @@ def repair_persona_reply(
 
     cleaned = enforce_rare_mode(sender_id, cleaned, turn_mode)
     cleaned = sanitize_reply(cleaned)
+    cleaned = enforce_time_reply_shape(cleaned, turn_mode)
 
     if is_repetitive_reply(sender_id, cleaned):
         update_stats(repetition_repairs=1, persona_repairs=1, local_fallbacks=1)
         cleaned = fallback_reply(sender_id, user_text)
 
+    cleaned = enforce_time_reply_shape(cleaned, turn_mode)
     remember_recent_reply(sender_id, cleaned)
     log_sesh_if_present(sender_id, cleaned)
     return cleaned
@@ -1831,10 +2102,72 @@ def generate_threat_boundary_reply(
     remember_recent_reply(sender_id, fallback)
     return fallback
 
+
+STORY_REPLY_POOL = (
+    "story reply with zero context is wild",
+    "wait which part got u",
+    "nah explain that reaction",
+    "ye reaction kis part pe tha",
+    "this reaction needs context",
+    "u noticed that part huh",
+    "nah tu ye notice kar gaya",
+    "nah what gave it away",
+)
+HOT_TAKE_POOL = {
+    "movie": "nah that movie was overrated",
+    "music": "that artist is mid lately",
+    "food": "u actually rate that food",
+    "phone": "android clears iphone rn",
+    "game": "that game survives on hype",
+}
+OPINION_TRIGGER_PATTERN = re.compile(
+    r"\b(?:do\s+you\s+think|what\s+do\s+you\s+think|is\s+it\s+better|which\s+is\s+(?:best|better)|"
+    r"what(?:'s|\s+is)\s+better|which\s+one|kaunsa\s+(?:best|better)|kya\s+lagta|tera\s+opinion|"
+    r"overrated|underrated|better|best)\b",
+    re.I,
+)
+HIGH_STAKES_OPINION_PATTERN = re.compile(
+    r"\b(?:doctor|medicine|symptom|health|injury|suicide|self harm|legal|lawyer|police|court|"
+    r"money|loan|debt|invest|crypto|bet|gambl|weapon|fight|drug|dose|pregnan|sex|abuse|blackmail)\b",
+    re.I,
+)
+
+
+def should_use_hot_take(text: str) -> bool:
+    return (
+        bool(OPINION_TRIGGER_PATTERN.search(text))
+        and not HIGH_STAKES_OPINION_PATTERN.search(text)
+        and random.random() < 0.35
+    )
+
+
+def hot_take_fallback_reply(sender_id: str, text: str) -> str:
+    normalized = normalize_text(text)
+    topic_words = {
+        "movie": ("movie", "film", "show", "series"),
+        "music": ("music", "song", "artist", "album", "rapper"),
+        "food": ("food", "pizza", "burger", "momos", "biryani"),
+        "phone": ("phone", "iphone", "android", "samsung", "pixel"),
+        "game": ("game", "gaming", "playstation", "xbox"),
+    }
+    for topic, words in topic_words.items():
+        if any(word in normalized for word in words):
+            return choose_fresh(sender_id, (HOT_TAKE_POOL[topic],))
+    return choose_fresh(sender_id, ("popular answer is lazy tho", "nah the opposite take makes more sense", "everyone rates that way too high"))
+
+
+def story_fallback_reply(sender_id: str, text: str) -> str:
+    if "?" in text or re.search(r"\b(?:what|why|how|kya|kaise|kyu)\b", text, re.I):
+        return fallback_reply(sender_id, text)
+    return choose_fresh(sender_id, STORY_REPLY_POOL)
+
+
 def generate_reply(
     sender_id: str,
     user_text: str,
     attachments: tuple[MediaAttachment, ...] = (),
+    *,
+    story_reply: bool = False,
 ) -> str:
     turn_text = user_text.strip() or media_summary(attachments)
     initial_mode, initial_register = classify_turn(turn_text)
@@ -1842,6 +2175,7 @@ def generate_reply(
         bump_tutan(sender_id)
     if initial_mode not in ("deletion", "spam"):
         record_petty(sender_id, turn_text)
+        record_beef(sender_id, turn_text)
 
     known_name = remembered_name_reply(sender_id, user_text)
     if known_name:
@@ -1853,7 +2187,13 @@ def generate_reply(
         remember_recent_reply(sender_id, identity)
         return identity
 
-    # FORCE AGGRESSIVE POOL FOR BOTH THREAT AND PROVOKED
+    sticker_reply = sticker_reaction(attachments)
+    if sticker_reply:
+        update_stats(sticker_reactions=1)
+        sticker_reply = enforce_time_reply_shape(sticker_reply, "normal")
+        remember_recent_reply(sender_id, sticker_reply)
+        return sticker_reply
+        # CHATAK AGGRESSION OVERRIDE – force aggressive pool for threat/provoked
     if initial_mode in ("threat", "provoked"):
         chosen = random.choice(THREAT_BOUNDARY_REPLIES_HI)
         remember_recent_reply(sender_id, chosen)
@@ -1866,6 +2206,30 @@ def generate_reply(
     messages: list[dict[str, Any]] = list(history) + [{"role": "user", "content": current_content}]
     system_prompt, turn_mode = build_turn_system_prompt(sender_id, turn_text, history)
 
+    if turn_mode == "threat":
+        lang: Literal["hi", "en", "mix"] = (
+            initial_register if initial_register in ("hi", "en", "mix") else detect_lang(turn_text)
+        )
+        return generate_threat_boundary_reply(sender_id, messages, system_prompt, lang)
+
+    hot_take = turn_mode == "normal" and should_use_hot_take(turn_text)
+    if hot_take:
+        update_stats(hot_take_turns=1)
+        system_prompt += (
+            "\n\nPRIVATE HOT TAKE MODE\n"
+            "Give a deliberately unexpected but defensible opinion about this low-stakes topic. "
+            "Flip the obvious consensus when it makes sense, stay specific, and do not invent facts. "
+            "Keep the same short Delhi/Hinglish DM voice."
+        )
+        turn_mode = "hot_take"
+    if story_reply and turn_mode not in {"threat", "provoked"}:
+        system_prompt += (
+            "\n\nPRIVATE STORY REPLY MODE\n"
+            "The sender replied directly to your Instagram story. Answer their reaction, not the story as an outside observer. "
+            "Keep it punchy and spontaneous: usually 2-8 words, at most two short lines, no explanation."
+        )
+        turn_mode = "story"
+
     draft = ""
     prompt_for_attempt = system_prompt
     for attempt in range(2):
@@ -1874,7 +2238,12 @@ def generate_reply(
         except Exception as exc:
             log.exception("Claude generation failed; using local persona fallback")
             update_stats(errors=1, local_fallbacks=1, last_error=f"Claude: {type(exc).__name__}")
-            draft = fallback_reply(sender_id, turn_text)
+            if hot_take:
+                draft = hot_take_fallback_reply(sender_id, turn_text)
+            elif story_reply:
+                draft = story_fallback_reply(sender_id, turn_text)
+            else:
+                draft = fallback_reply(sender_id, turn_text)
             break
         reason = draft_rejection_reason(
             sender_id,
@@ -1906,6 +2275,18 @@ def generate_reply(
         turn_mode,
         has_media=bool(attachments),
     )
+
+
+def generate_story_reply(
+    sender_id: str,
+    text: str,
+    story_id: str,
+    attachments: tuple[MediaAttachment, ...] = (),
+) -> str:
+    _ = story_id
+    update_stats(story_replies=1)
+    story_text = text.strip() or "[sender reacted to your instagram story]"
+    return generate_reply(sender_id, story_text, attachments, story_reply=True)
 
 # ... (rest of code unchanged: split_reply_bubbles, remember_turn, send_message, etc.)
 # I'll include the full remaining code for completeness, but it's identical to earlier.
@@ -1946,6 +2327,25 @@ def graph_error_is_transient(response: requests.Response) -> bool:
         return int(error.get("code")) in {1, 2, 4, 17, 32, 341, 613}
     except (TypeError, ValueError):
         return False
+
+
+def send_typing_indicator(recipient_id: str) -> None:
+    if not IG_ACCESS_TOKEN or not IG_ACCOUNT_ID:
+        return
+    try:
+        response = get_http_session().post(
+            SEND_URL,
+            json={"recipient": {"id": recipient_id}, "sender_action": "typing_on"},
+            headers={"Authorization": f"Bearer {IG_ACCESS_TOKEN}"},
+            timeout=(3, 8),
+        )
+        if 200 <= response.status_code < 300:
+            update_stats(typing_indicators_sent=1)
+        else:
+            log.debug("Instagram typing indicator failed status=%s", response.status_code)
+    except requests.RequestException:
+        log.debug("Instagram typing indicator failed recipient_suffix=%s", recipient_id[-6:], exc_info=True)
+
 
 def send_message(recipient_id: str, text: str) -> None:
     if not IG_ACCESS_TOKEN or not IG_ACCOUNT_ID:
@@ -1992,7 +2392,10 @@ def process_message(sender_id: str, batch: list[QueuedMessage]) -> None:
         for item in batch
         for attachment in item.attachments
     )[:MAX_MEDIA_ATTACHMENTS]
+    story_id = next((item.story_id for item in reversed(batch) if item.story_id), "")
     turn_memory_text = remembered_turn_text(combined_text, combined_attachments)
+    if story_id:
+        turn_memory_text = f"[replied to your instagram story]\n{turn_memory_text}".strip()
     received_at = max(item.received_monotonic for item in batch)
     is_deletion = is_data_deletion_request(combined_text)
 
@@ -2008,15 +2411,20 @@ def process_message(sender_id: str, batch: list[QueuedMessage]) -> None:
                 petty_memory.pop(sender_id, None)
             with tutan_lock:
                 tutan_meters.pop(sender_id, None)
+            clear_beef_memory(sender_id)
             clear_sender_memory(sender_id)
             reply = "done ur chat history is deleted"
         else:
+            send_typing_indicator(sender_id)
             incoming_mode, _ = classify_turn(combined_text or turn_memory_text)
             if incoming_mode in {"threat", "provoked"}:
                 remember_direct_abuse(sender_id)
             learn_name_from_text(sender_id, combined_text)
             fetch_sender_profile(sender_id)
-            reply = generate_reply(sender_id, combined_text, combined_attachments)
+            if story_id:
+                reply = generate_story_reply(sender_id, combined_text, story_id, combined_attachments)
+            else:
+                reply = generate_reply(sender_id, combined_text, combined_attachments)
 
         bubbles = split_reply_bubbles(reply)
         if not bubbles:
@@ -2028,6 +2436,7 @@ def process_message(sender_id: str, batch: list[QueuedMessage]) -> None:
                 delay = first_reply_delay_seconds(turn_memory_text, bubble, received_at)
             else:
                 delay = random.uniform(DOUBLE_TEXT_DELAY_MIN_SECONDS, DOUBLE_TEXT_DELAY_MAX_SECONDS)
+            send_typing_indicator(sender_id)
             if delay > 0:
                 time.sleep(delay)
             send_message(sender_id, bubble)
@@ -2147,6 +2556,8 @@ def diagnostics() -> tuple[Any, int]:
         snapshot["previously_abusive_senders"] = sum(
             1 for memory in sender_memories.values() if memory.abuse_count
         )
+    with beef_lock:
+        snapshot["active_beef_senders"] = len(beef_memory)
     return jsonify(snapshot), 200
 
 @app.get("/webhook")
@@ -2178,15 +2589,20 @@ def handle_webhook() -> tuple[Any, int]:
                 continue
             user_text = message.get("text", "")
             user_text = user_text.strip() if isinstance(user_text, str) else ""
+            if user_text and any("\u0900" <= character <= "\u097f" for character in user_text):
+                user_text = transliterate_devanagari(user_text)
             attachments = extract_media_attachments(message)
-            if not user_text and not attachments:
+            reply_to = message.get("reply_to") if isinstance(message.get("reply_to"), dict) else {}
+            story = reply_to.get("story") if isinstance(reply_to.get("story"), dict) else {}
+            story_id = _string_value(story.get("id"))
+            if not user_text and not attachments and not story_id:
                 continue
             key = event_key(sender_id, message, event)
             if not reserve_event(key):
                 duplicates += 1
                 update_stats(duplicates=1)
                 continue
-            turn_text = user_text or media_summary(attachments)
+            turn_text = user_text or media_summary(attachments) or "[sender reacted to your instagram story]"
             preliminary_mode, _ = classify_turn(turn_text)
             spam_reason = None
             if preliminary_mode not in ("deletion", "threat"):
@@ -2201,6 +2617,7 @@ def handle_webhook() -> tuple[Any, int]:
                 attachments=attachments,
                 event_key=key,
                 received_monotonic=time.monotonic(),
+                story_id=story_id,
             )
             if not enqueue_message(sender_id, queued_message):
                 release_event(key)
@@ -2212,6 +2629,7 @@ def handle_webhook() -> tuple[Any, int]:
     return jsonify(status="accepted", queued=queued, spammed=spammed, duplicates=duplicates), 200
 
 load_sender_memories()
+load_beef_memory()
 
 for missing_name in missing_required_config():
     log.warning("Missing environment variable: %s", missing_name)
