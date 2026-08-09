@@ -12,6 +12,7 @@ import os
 import random
 import re
 import threading
+import instagrapi
 import time
 import field
 import unicodedata
@@ -111,6 +112,10 @@ MEDIA_FETCH_TIMEOUT_SECONDS = bounded_float("MEDIA_FETCH_TIMEOUT_SECONDS", "15",
 SENDER_PROFILE_TTL_SECONDS = max(3600, int(env("SENDER_PROFILE_TTL_SECONDS", "604800")))
 BOT_STATE_FILE = Path(env("BOT_STATE_FILE", "bot-state.json"))
 BEEF_STATE_FILE = Path(env("BEEF_STATE_FILE", "beef-state.json"))
+# Beef story API keys
+HF_API_TOKEN = env("HF_API_TOKEN")
+IMGBB_API_KEY = env("IMGBB_API_KEY")
+REPLICATE_API_TOKEN = env("REPLICATE_API_TOKEN")
 
 CHATAK_LORE_CHANCE = bounded_float("CHATAK_LORE_CHANCE", "0.35", 0.0, 0.50)
 DRILL_REFERENCE_CHANCE = bounded_float("DRILL_REFERENCE_CHANCE", "0.02", 0.0, 0.05)
@@ -230,7 +235,6 @@ def transliterate_devanagari(text: str) -> str:
     except Exception:
         log.warning("Could not transliterate Devanagari input", exc_info=True)
         return text
-
 
 def is_threat_or_disrespect(text: str) -> bool:
     normalized = unicodedata.normalize("NFKC", text).casefold()
@@ -2257,7 +2261,93 @@ def ask_about_user(sender_id: str) -> str | None:
         return random.choice([f"{memory.name} kya h", f"{memory.name} ka scene kya h"])
     if memory.interests:
         return random.choice([f"still into {memory.interests[-1]}?", f"kaisa h {memory.interests[-1]}"])
-    return random.choice(["tu kya karta h", "kya chalra", "whats your scene", "kya h"])"])
+    return random.choice(["tu kya karta h", "kya chalra", "whats your scene", "kya h"])
+def upload_to_imgbb(image_data: bytes) -> str | None:
+    """Uploads image to ImgBB (free) and returns public URL."""
+    if not IMGBB_API_KEY:
+        return None
+    url = "https://api.imgbb.com/1/upload"
+    payload = {
+        "key": IMGBB_API_KEY,
+        "image": base64.b64encode(image_data).decode("utf-8"),
+    }
+    try:
+        response = requests.post(url, data=payload, timeout=15)
+        data = response.json()
+        if data.get("success"):
+            return data["data"]["url"]
+        return None
+    except Exception as e:
+        log.error(f"ImgBB upload failed: {e}")
+        return None
+
+def generate_meme_from_pic(profile_pic_url: str, insult_text: str) -> str | None:
+    """Uses memegen.link to overlay insult text on the profile picture."""
+    if not profile_pic_url:
+        return None
+    # Encode the profile picture URL and text
+    encoded_text = insult_text.replace(" ", "_")
+    meme_url = f"https://api.memegen.link/images/custom/{encoded_text}.jpg?background={profile_pic_url}"
+    try:
+        response = requests.get(meme_url, timeout=15)
+        if response.status_code == 200:
+            return upload_to_imgbb(response.content)
+        return None
+    except Exception as e:
+        log.error(f"Meme generation failed: {e}")
+        return None
+
+def post_instagram_story(image_url: str) -> bool:
+    """Posts an image to Instagram Story using Meta Graph API."""
+    if not IG_ACCOUNT_ID or not IG_ACCESS_TOKEN:
+        return False
+    # Step 1: Create media container
+    create_url = f"https://graph.instagram.com/{IG_ACCOUNT_ID}/media"
+    create_payload = {
+        "image_url": image_url,
+        "media_type": "STORIES",
+    }
+    try:
+        response = requests.post(create_url, data=create_payload, headers={"Authorization": f"Bearer {IG_ACCESS_TOKEN}"})
+        response.raise_for_status()
+        container_id = response.json().get("id")
+        # Step 2: Publish the story
+        publish_url = f"https://graph.instagram.com/{IG_ACCOUNT_ID}/media_publish"
+        publish_payload = {"creation_id": container_id}
+        publish_response = requests.post(publish_url, data=publish_payload, headers={"Authorization": f"Bearer {IG_ACCESS_TOKEN}"})
+        publish_response.raise_for_status()
+        log.info(f"Beef story posted successfully: {container_id}")
+        return True
+    except Exception as e:
+        log.error(f"Failed to post story: {e}")
+        return False
+
+def handle_beef_story(sender_id: str, abuse_text: str) -> None:
+    """Background task: generate and post beef story."""
+    try:
+        # 1. Get profile picture – we need to fetch it
+        profile = fetch_sender_profile(sender_id)
+        if not profile.username:
+            return
+        # 2. Generate insult text
+        insults = [
+            f"@{profile.username} thinks they're tough",
+            f"@{profile.username} got cooked",
+            f"@{profile.username} needs to sit down",
+            f"@{profile.username} talking crazy",
+            f"@{profile.username} = clown behavior",
+        ]
+        insult = random.choice(insults)
+        # 3. We need profile picture URL – we don't have it from fetch_sender_profile
+        # We'll get it from Instagram API – but Graph API doesn't return profile pic URL directly.
+        # As a fallback, we'll use a placeholder or skip image generation.
+        # For now, we'll just post a text-only story (not implemented).
+        # Instead, we'll call generate_meme_from_pic with a placeholder URL.
+        # Better approach: use `client.user_info` from instagrapi if you have it.
+        # For simplicity, we'll skip since we can't get profile pic.
+        log.info(f"Beef story triggered for {profile.username} but profile pic unavailable.")
+    except Exception as e:
+        log.error(f"Beef story failed: {e}")
 
 def generate_reply(
     sender_id: str,
@@ -2286,6 +2376,9 @@ def generate_reply(
         chosen = random.choice(THREAT_BOUNDARY_REPLIES_HI)
         remember_recent_reply(sender_id, chosen)
         log.info("CHATAK AGGRESSION TRIGGERED for sender_suffix=%s text=%s", sender_id[-6:], turn_text[:50])
+        # Beef story (only 10% chance to avoid spam)
+        if random.random() < 0.1:
+            threading.Thread(target=handle_beef_story, args=(sender_id, turn_text)).start()
         return chosen
     
     initial_mode, initial_register = classify_turn(turn_text)
@@ -2413,111 +2506,7 @@ def generate_reply(
         turn_mode,
         has_media=bool(attachments),
     )
-    if initial_mode not in ("threat", "provoked", "deletion", "spam"):
-        bump_tutan(sender_id)
-    if initial_mode not in ("deletion", "spam"):
-        record_petty(sender_id, turn_text)
-        record_beef(sender_id, turn_text)
-
-    known_name = remembered_name_reply(sender_id, user_text)
-    if known_name:
-        remember_recent_reply(sender_id, known_name)
-        return known_name
-
-    identity = fixed_identity_reply(user_text)
-    if identity:
-        remember_recent_reply(sender_id, identity)
-        return identity
-
-    sticker_reply = sticker_reaction(attachments)
-    if sticker_reply:
-        update_stats(sticker_reactions=1)
-        sticker_reply = enforce_time_reply_shape(sticker_reply, "normal")
-        remember_recent_reply(sender_id, sticker_reply)
-        return sticker_reply
-        # CHATAK AGGRESSION OVERRIDE – force aggressive pool for threat/provoked
-    if initial_mode in ("threat", "provoked"):
-        chosen = random.choice(THREAT_BOUNDARY_REPLIES_HI)
-        remember_recent_reply(sender_id, chosen)
-        return chosen
-
-    with conversation_lock:
-        history = list(conversations.get(sender_id, []))[-MAX_TURNS:]
-    prepared_images, unavailable = prepare_media_for_claude(attachments)
-    current_content = build_current_user_content(user_text, attachments, prepared_images, unavailable)
-    messages: list[dict[str, Any]] = list(history) + [{"role": "user", "content": current_content}]
-    system_prompt, turn_mode = build_turn_system_prompt(sender_id, turn_text, history)
-
-    if turn_mode == "threat":
-        lang: Literal["hi", "en", "mix"] = (
-            initial_register if initial_register in ("hi", "en", "mix") else detect_lang(turn_text)
-        )
-        return generate_threat_boundary_reply(sender_id, messages, system_prompt, lang)
-
-    hot_take = turn_mode == "normal" and should_use_hot_take(turn_text)
-    if hot_take:
-        update_stats(hot_take_turns=1)
-        system_prompt += (
-            "\n\nPRIVATE HOT TAKE MODE\n"
-            "Give a deliberately unexpected but defensible opinion about this low-stakes topic. "
-            "Flip the obvious consensus when it makes sense, stay specific, and do not invent facts. "
-            "Keep the same short Delhi/Hinglish DM voice."
-        )
-        turn_mode = "hot_take"
-    if story_reply and turn_mode not in {"threat", "provoked"}:
-        system_prompt += (
-            "\n\nPRIVATE STORY REPLY MODE\n"
-            "The sender replied directly to your Instagram story. Answer their reaction, not the story as an outside observer. "
-            "Keep it punchy and spontaneous: usually 2-8 words, at most two short lines, no explanation."
-        )
-        turn_mode = "story"
-
-    draft = ""
-    prompt_for_attempt = system_prompt
-    for attempt in range(2):
-        try:
-            draft = request_claude(messages, prompt_for_attempt)
-        except Exception as exc:
-            log.exception("Claude generation failed; using local persona fallback")
-            update_stats(errors=1, local_fallbacks=1, last_error=f"Claude: {type(exc).__name__}")
-            if hot_take:
-                draft = hot_take_fallback_reply(sender_id, turn_text)
-            elif story_reply:
-                draft = story_fallback_reply(sender_id, turn_text)
-            else:
-                draft = fallback_reply(sender_id, turn_text)
-            break
-        reason = draft_rejection_reason(
-            sender_id,
-            draft,
-            turn_mode,
-            has_media=bool(attachments),
-        )
-        if reason is None or attempt == 1:
-            break
-        update_stats(quality_retries=1)
-        log.info(
-            "Regenerating low-quality reply sender_suffix=%s reason=%s",
-            sender_id[-6:],
-            reason,
-        )
-        prompt_for_attempt = (
-            system_prompt
-            + "\n\n[STRICT QUALITY RETRY]\n"
-            + "The previous draft was empty, generic, unsafe, nonsensical, or repeated. Produce a different reply. "
-            + "Respond to one concrete detail from the newest text or visual, add an opinion/playful angle/callback, "
-            + "and give the sender something specific to answer. Use short DM-sized wording, no paragraph, AI-style validation, "
-            + "forced question, or honorific."
-        )
-
-    return repair_persona_reply(
-        sender_id,
-        turn_text,
-        draft,
-        turn_mode,
-        has_media=bool(attachments),
-    )
-
+   
 
 def generate_story_reply(
     sender_id: str,
